@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+.tmp
+.pgdata
+.pgdata-test
+src/generated
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.log
+tests

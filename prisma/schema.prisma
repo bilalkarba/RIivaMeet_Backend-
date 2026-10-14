@@ -1,0 +1,419 @@
+// ---------------------------------------------------------------------------
+// Coachini API - Prisma schema
+//
+// Conventions:
+//  - Tables and columns are mapped to snake_case so raw SQL (used for the
+//    Haversine distance search) stays readable.
+//  - All timestamps are `timestamptz(3)` to avoid timezone ambiguity.
+//  - Money is `decimal(10, 2)` - never float - so booking prices stay exact.
+//  - Coach ratings are NOT stored: they are always derived from `reviews`
+//    (single source of truth) and included in read models on the fly.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  runtime  = "nodejs"
+  // Explicit ESM output so the generated client compiles with `tsc` (NodeNext)
+  // and runs unchanged under Node, tsx and Vitest.
+  moduleFormat        = "esm"
+  generatedFileExtension = "ts"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // The connection URL lives in prisma.config.ts (Prisma ORM 7 requirement).
+}
+
+enum Role {
+  CLIENT
+  COACH
+  ADMIN
+}
+
+enum BookingStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+  COMPLETED
+}
+
+enum NotificationType {
+  BOOKING_REQUEST
+}
+
+/// Audio or video. Media itself is peer-to-peer (WebRTC); this only records intent.
+enum CallType {
+  AUDIO
+  VIDEO
+}
+
+/// Lifecycle of a 1:1 call.
+///  RINGING   - created, callee has not answered yet (answeredAt/endedAt null)
+///  ACCEPTED  - callee answered, media is flowing (answeredAt set, endedAt null)
+///  REJECTED  - callee declined (endedAt set)
+///  MISSED    - nobody answered in time, or the callee was unreachable (endedAt set)
+///  CANCELLED - caller hung up before the callee answered (endedAt set)
+///  ENDED     - a connected call finished normally (answeredAt and endedAt set)
+enum CallStatus {
+  RINGING
+  ACCEPTED
+  REJECTED
+  MISSED
+  CANCELLED
+  ENDED
+}
+
+enum ExperienceLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+  PROFESSIONAL
+}
+
+/// What a report points at. `targetId` references the relevant row (a user, a post, a
+/// message); `targetUserId` is filled in for USER reports so moderation can query it.
+enum ReportTargetType {
+  USER
+  POST
+  MESSAGE
+}
+
+enum ReportReason {
+  SPAM
+  HARASSMENT
+  INAPPROPRIATE_CONTENT
+  FAKE_PROFILE
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  RESOLVED
+  REJECTED
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  /// Stored lower-cased + trimmed. Unique index enforces one account per address.
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String
+  phone        String?
+  role         Role     @default(CLIENT)
+  /// Public pseudonym shown instead of `name` when set.
+  displayName  String?  @map("display_name")
+  /// Public avatar URL (object storage); never a path on the application server.
+  avatarUrl    String?  @map("avatar_url")
+  /// Free-form profile bio. Distinct from the coach bio on `coach_profiles`.
+  bio          String?  @db.Text
+  city         String?
+  country      String?
+  /// Athlete/self-declared level. Coaches keep their own level on `coach_profiles`.
+  level        ExperienceLevel?
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  coachProfile CoachProfile?
+  bookings     Booking[]     @relation("ClientBookings")
+  reviews      Review[]
+  sports       UserSport[]
+
+  blocksInitiated Block[]  @relation("BlockerBlocks")
+  blocksReceived  Block[]  @relation("BlockedBlocks")
+  reportsFiled    Report[] @relation("ReportReporter")
+  reportsAgainst  Report[] @relation("ReportTargetUser")
+  reportsReviewed Report[] @relation("ReportReviewer")
+
+  conversations ConversationParticipant[]
+  messagesSent  Message[]                 @relation("MessageSender")
+  notifications Notification[]            @relation("NotificationRecipient")
+
+  callsInitiated Call[] @relation("CallCaller")
+  callsReceived  Call[] @relation("CallCallee")
+  callsEnded     Call[] @relation("CallEnder")
+
+  @@index([role])
+  @@index([city, country])
+  @@map("users")
+}
+
+model CoachProfile {
+  id              String          @id @default(uuid()) @db.Uuid
+  userId          String          @unique @map("user_id") @db.Uuid
+  bio             String          @db.Text
+  /// Free-form certifications / qualifications (e.g. "UEFA B Licence", "Lifeguard").
+  certifications  String[]        @default([])
+  hourlyPrice     Decimal         @map("hourly_price") @db.Decimal(10, 2)
+  experienceLevel ExperienceLevel @map("experience_level")
+  city            String
+  neighborhood    String
+  address         String?
+  /// Nullable so a profile can be drafted; coordinates are REQUIRED to publish
+  /// (enforced in the service layer) because distance search depends on them.
+  latitude        Float?
+  longitude       Float?
+  isPublished     Boolean         @default(false) @map("is_published")
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sports       CoachSport[]
+  availability Availability[]
+  bookings     Booking[]
+  reviews      Review[]
+
+  @@index([isPublished, hourlyPrice])
+  @@index([city, neighborhood])
+  @@index([latitude, longitude])
+  @@map("coach_profiles")
+}
+
+model Sport {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @unique
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  coaches CoachSport[]
+  athletes UserSport[]
+
+  @@map("sports")
+}
+
+/// A discipline a user (usually an athlete) practices, with an optional per-sport level.
+/// Coaches keep their taught sports on `coach_sports`; this table powers athlete
+/// profiles and the compatible-profile matching endpoint.
+model UserSport {
+  userId    String           @map("user_id") @db.Uuid
+  sportId   String           @map("sport_id") @db.Uuid
+  level     ExperienceLevel?
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sport Sport @relation(fields: [sportId], references: [id], onDelete: Cascade)
+
+  // Composite primary key: a user cannot practise the same discipline twice.
+  @@id([userId, sportId])
+  @@index([sportId])
+  @@map("user_sports")
+}
+
+model CoachSport {
+  coachProfileId String   @map("coach_profile_id") @db.Uuid
+  sportId        String   @map("sport_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  coachProfile CoachProfile @relation(fields: [coachProfileId], references: [id], onDelete: Cascade)
+  sport        Sport        @relation(fields: [sportId], references: [id], onDelete: Cascade)
+
+  // Composite primary key: a coach cannot offer the same sport twice.
+  @@id([coachProfileId, sportId])
+  @@index([sportId])
+  // Secondary access path of the coach search query (sport -> coach lookup).
+  // Declared here so `prisma migrate` manages it and never drops it as drift.
+  @@index([sportId, coachProfileId])
+  @@map("coach_sports")
+}
+
+model Availability {
+  id             String   @id @default(uuid()) @db.Uuid
+  coachProfileId String   @map("coach_profile_id") @db.Uuid
+  startAt        DateTime @map("start_at") @db.Timestamptz(3)
+  endAt          DateTime @map("end_at") @db.Timestamptz(3)
+  isAvailable    Boolean  @default(true) @map("is_available")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  coachProfile CoachProfile @relation(fields: [coachProfileId], references: [id], onDelete: Cascade)
+
+  @@index([coachProfileId, startAt])
+  @@index([coachProfileId, isAvailable, startAt, endAt])
+  @@map("availabilities")
+}
+
+model Booking {
+  id             String        @id @default(uuid()) @db.Uuid
+  clientId       String        @map("client_id") @db.Uuid
+  coachProfileId String        @map("coach_profile_id") @db.Uuid
+  startAt        DateTime      @map("start_at") @db.Timestamptz(3)
+  endAt          DateTime      @map("end_at") @db.Timestamptz(3)
+  /// Snapshot of the coach's hourly price * session length at request time.
+  priceAtBooking Decimal       @map("price_at_booking") @db.Decimal(10, 2)
+  status         BookingStatus @default(PENDING)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  client       User         @relation("ClientBookings", fields: [clientId], references: [id], onDelete: Cascade)
+  coachProfile CoachProfile @relation(fields: [coachProfileId], references: [id], onDelete: Cascade)
+  review       Review?
+  notification Notification?
+  conversation Conversation?
+
+  @@index([clientId, status])
+  @@index([coachProfileId, status])
+  @@index([coachProfileId, startAt, endAt])
+  @@map("bookings")
+}
+
+model Notification {
+  id          String           @id @default(uuid()) @db.Uuid
+  recipientId String           @map("recipient_id") @db.Uuid
+  bookingId   String           @unique @map("booking_id") @db.Uuid
+  type        NotificationType @default(BOOKING_REQUEST)
+  readAt      DateTime?        @map("read_at") @db.Timestamptz(3)
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  recipient User    @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, readAt, createdAt])
+  @@map("notifications")
+}
+
+model Review {
+  id             String   @id @default(uuid()) @db.Uuid
+  /// Unique => one review per booking, enforced at the database level.
+  bookingId      String   @unique @map("booking_id") @db.Uuid
+  clientId       String   @map("client_id") @db.Uuid
+  coachProfileId String   @map("coach_profile_id") @db.Uuid
+  rating         Int
+  comment        String?  @db.Text
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  booking      Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  client       User         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  coachProfile CoachProfile @relation(fields: [coachProfileId], references: [id], onDelete: Cascade)
+
+  @@index([coachProfileId, createdAt])
+  @@map("reviews")
+}
+
+/// A directional block. The blocked user disappears from the blocker's discovery
+/// results, and (once chat exists) neither party can message the other.
+model Block {
+  id        String   @id @default(uuid()) @db.Uuid
+  blockerId String   @map("blocker_id") @db.Uuid
+  blockedId String   @map("blocked_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  blocker User @relation("BlockerBlocks", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("BlockedBlocks", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  // One block per direction; unblocking deletes the row.
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+  @@map("blocks")
+}
+
+/// A moderation report against a user, post or message.
+model Report {
+  id             String           @id @default(uuid()) @db.Uuid
+  reporterId     String           @map("reporter_id") @db.Uuid
+  targetType     ReportTargetType @map("target_type")
+  /// Id of the reported entity (user id, post id or message id).
+  targetId       String           @map("target_id") @db.Uuid
+  /// Set for USER reports; null for other targets until those models exist.
+  targetUserId   String?          @map("target_user_id") @db.Uuid
+  reason         ReportReason
+  description    String?          @db.Text
+  status         ReportStatus     @default(PENDING)
+  reviewedById   String?          @map("reviewed_by_id") @db.Uuid
+  reviewedAt     DateTime?        @map("reviewed_at") @db.Timestamptz(3)
+  resolutionNote String?          @map("resolution_note") @db.Text
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  reporter   User  @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  targetUser User? @relation("ReportTargetUser", fields: [targetUserId], references: [id], onDelete: SetNull)
+  reviewedBy User? @relation("ReportReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([targetType, targetId])
+  @@index([targetUserId])
+  @@index([reporterId, createdAt])
+  @@map("reports")
+}
+
+/// A private 1:1 conversation. Group chat is intentionally out of scope; the model
+/// keeps a participants table so adding it later is a data change, not a rewrite.
+model Conversation {
+  id            String    @id @default(uuid()) @db.Uuid
+  bookingId     String?   @unique @map("booking_id") @db.Uuid
+  /// Bumped on every message so inboxes can be ordered cheaply.
+  lastMessageAt DateTime? @map("last_message_at") @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  participants ConversationParticipant[]
+  messages     Message[]
+  calls        Call[]
+  booking      Booking?   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([lastMessageAt])
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  conversationId String    @map("conversation_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  joinedAt       DateTime  @default(now()) @map("joined_at") @db.Timestamptz(3)
+  /// Last time this participant opened the conversation; powers unread counts.
+  lastReadAt     DateTime? @map("last_read_at") @db.Timestamptz(3)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_participants")
+}
+
+model Message {
+  id             String   @id @default(uuid()) @db.Uuid
+  conversationId String   @map("conversation_id") @db.Uuid
+  senderId       String   @map("sender_id") @db.Uuid
+  body           String   @db.Text
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+/// Call history for a 1:1 audio/video call.
+///
+/// Calls are scoped to a booking conversation, so only a client and their coach can
+/// call each other. Nothing about the media is stored (no recording, no SDP, no ICE
+/// candidates): this table only records who called whom, when, and how it ended, which
+/// is what the UI needs for a call log and what the server needs to prevent a second
+/// concurrent call. Live call coordination is in-memory (`call.service`); this is the
+/// durable record.
+model Call {
+  id             String     @id @default(uuid()) @db.Uuid
+  conversationId String     @map("conversation_id") @db.Uuid
+  callerId       String     @map("caller_id") @db.Uuid
+  calleeId       String     @map("callee_id") @db.Uuid
+  type           CallType
+  status         CallStatus @default(RINGING)
+  startedAt      DateTime   @default(now()) @map("started_at") @db.Timestamptz(3)
+  /// Set when the callee accepts. Present iff status is ACCEPTED or ENDED.
+  answeredAt     DateTime?  @map("answered_at") @db.Timestamptz(3)
+  /// Set when the call reaches a terminal state. Absent while RINGING or ACCEPTED.
+  endedAt        DateTime?  @map("ended_at") @db.Timestamptz(3)
+  /// Who hung up (or declined/timed out), for the call log.
+  endedById      String?    @map("ended_by_id") @db.Uuid
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  caller       User         @relation("CallCaller", fields: [callerId], references: [id], onDelete: Cascade)
+  callee       User         @relation("CallCallee", fields: [calleeId], references: [id], onDelete: Cascade)
+  endedBy      User?        @relation("CallEnder", fields: [endedById], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, startedAt])
+  @@index([calleeId, status])
+  @@index([callerId, status])
+  @@map("calls")
+}

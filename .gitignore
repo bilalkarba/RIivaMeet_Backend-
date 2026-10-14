@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+.tmp/
+*.log
+npm-debug.log*
+
+.env
+.env.*
+!.env.example
+
+# Prisma 7 generates the client into the source tree (see generator output)
+src/generated/
+
+# Local embedded PostgreSQL data directories used by scripts/dev-db.ts
+.pgdata/
+.pgdata-test/
+
+.DS_Store
+.idea/
+.vscode/
