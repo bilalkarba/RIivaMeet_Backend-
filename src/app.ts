@@ -4,10 +4,9 @@ import path from 'node:path';
 
 import cors, { type CorsOptions } from 'cors';
 import express, { type Express } from 'express';
-import { default as helmet } from 'helmet';
 import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
-
+import helmet from 'helmet';
 import { API_PREFIX } from './config/constants.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
