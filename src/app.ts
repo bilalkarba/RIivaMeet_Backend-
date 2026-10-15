@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import cors, { type CorsOptions } from 'cors';
 import express, { type Express } from 'express';
-import * as helmet from 'helmet';
+import { default as helmet } from 'helmet';
 import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
@@ -70,7 +70,7 @@ export function createApp(): Express {
 
   // Security headers.
   app.use(
-    helmet.default({
+    helmet({
       contentSecurityPolicy: false,
       crossOriginEmbedderPolicy: false,
     }),
