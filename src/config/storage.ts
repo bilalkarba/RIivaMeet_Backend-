@@ -32,6 +32,10 @@ export interface StorageConfig {
   forcePathStyle: boolean;
   signedUrlTtlSeconds: number;
   maxUploadBytes: number;
+  /** Maximum size of a verification document (separate from public media). */
+  documentMaxUploadBytes: number;
+  /** Private bucket used for verification documents; defaults to `bucket`. */
+  documentBucket?: string;
   localDir?: string;
   /** Human-readable explanation of why the provider is unavailable (empty when ready). */
   unavailableReason?: string;
@@ -49,6 +53,8 @@ export function resolveStorageConfig(): StorageConfig {
     forcePathStyle: env.STORAGE_FORCE_PATH_STYLE === 'true',
     signedUrlTtlSeconds: env.STORAGE_SIGNED_URL_TTL_SECONDS,
     maxUploadBytes: env.STORAGE_MAX_UPLOAD_BYTES,
+    documentMaxUploadBytes: env.STORAGE_DOCUMENT_MAX_UPLOAD_BYTES,
+    documentBucket: env.STORAGE_DOCUMENT_BUCKET ?? env.STORAGE_BUCKET ?? undefined,
     requiredEnvVars: [],
   };
 

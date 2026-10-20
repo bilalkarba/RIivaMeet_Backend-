@@ -1,14 +1,21 @@
-import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { ZodError } from 'zod';
+import type { NextFunction, Request, RequestHandler, Response } from "express";
+import { ZodError } from "zod";
+import { MulterError } from "multer";
 
-import { logger } from '../config/logger.js';
-import { env } from '../config/env.js';
-import { Prisma } from '../generated/prisma/client.js';
-import { ApiError, ErrorCode, type ApiErrorBody } from '../utils/errors.js';
+import { logger } from "../config/logger.js";
+import { env } from "../config/env.js";
+import { Prisma } from "../generated/prisma/client.js";
+import { ApiError, ErrorCode, type ApiErrorBody } from "../utils/errors.js";
 
 /** Terminal middleware for unmatched routes. */
-export const notFoundHandler: RequestHandler = (req: Request, _res: Response, next: NextFunction): void => {
-  next(ApiError.notFound(`Route ${req.method} ${req.originalUrl} does not exist`));
+export const notFoundHandler: RequestHandler = (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): void => {
+  next(
+    ApiError.notFound(`Route ${req.method} ${req.originalUrl} does not exist`),
+  );
 };
 
 interface ErrorResponseWithDetails {
@@ -17,37 +24,50 @@ interface ErrorResponseWithDetails {
   details?: unknown;
 }
 
-function mapPrismaError(error: Prisma.PrismaClientKnownRequestError): ErrorResponseWithDetails {
+function mapPrismaError(
+  error: Prisma.PrismaClientKnownRequestError,
+): ErrorResponseWithDetails {
   switch (error.code) {
-    case 'P2002': {
+    case "P2002": {
       const target = error.meta?.target;
-      const fields = Array.isArray(target) ? target.join(', ') : typeof target === 'string' ? target : 'field';
+      const fields = Array.isArray(target)
+        ? target.join(", ")
+        : typeof target === "string"
+          ? target
+          : "field";
       return {
         code: ErrorCode.CONFLICT,
         message: `A record with this ${fields} already exists`,
         details: { constraint: fields },
       };
     }
-    case 'P2003':
-      return { code: ErrorCode.CONFLICT, message: 'Related record constraint violated' };
-    case 'P2025':
-      return { code: ErrorCode.NOT_FOUND, message: 'Resource not found' };
-    case 'P2034':
+    case "P2003":
       return {
         code: ErrorCode.CONFLICT,
-        message: 'The request conflicted with a concurrent operation. Please retry.',
+        message: "Related record constraint violated",
+      };
+    case "P2025":
+      return { code: ErrorCode.NOT_FOUND, message: "Resource not found" };
+    case "P2034":
+      return {
+        code: ErrorCode.CONFLICT,
+        message:
+          "The request conflicted with a concurrent operation. Please retry.",
       };
     default:
-      return { code: ErrorCode.INTERNAL_ERROR, message: 'Database request failed' };
+      return {
+        code: ErrorCode.INTERNAL_ERROR,
+        message: "Database request failed",
+      };
   }
 }
 
 function isJsonBodyError(error: unknown): boolean {
   return (
     error instanceof SyntaxError &&
-    'status' in error &&
+    "status" in error &&
     (error as { status?: number }).status === 400 &&
-    'body' in error
+    "body" in error
   );
 }
 
@@ -56,7 +76,7 @@ function isJsonBodyError(error: unknown): boolean {
  *
  * Guarantees:
  *  - a stable, machine-readable `error.code` for every failure;
- *  - HTTP status codes that match the situation (400/401/403/404/409/429/500);
+ *  - HTTP status codes that match the situation (400/401/403/404/409/422/429/500);
  *  - never leaks stack traces or driver internals to clients in production
  *    (the full error is always logged server-side with the request id).
  */
@@ -75,43 +95,77 @@ export function errorHandler(
   let statusCode = 500;
   let response: ErrorResponseWithDetails = {
     code: ErrorCode.INTERNAL_ERROR,
-    message: 'Internal server error',
+    message: "Internal server error",
   };
-  let logLevel: 'warn' | 'error' = 'error';
+  let logLevel: "warn" | "error" = "error";
 
   if (error instanceof ApiError) {
     statusCode = error.statusCode;
-    response = { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) };
-    logLevel = statusCode >= 500 ? 'error' : 'warn';
+    response = {
+      code: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    };
+    logLevel = statusCode >= 500 ? "error" : "warn";
   } else if (error instanceof ZodError) {
     statusCode = 400;
     response = {
       code: ErrorCode.VALIDATION_ERROR,
-      message: 'Request validation failed',
+      message: "Request validation failed",
       details: error.issues.map((issue) => ({
-        path: issue.path.map(String).join('.'),
+        path: issue.path.map(String).join("."),
         message: issue.message,
         code: issue.code,
       })),
     };
-    logLevel = 'warn';
+    logLevel = "warn";
   } else if (error instanceof Prisma.PrismaClientKnownRequestError) {
     const mapped = mapPrismaError(error);
-    statusCode = mapped.code === ErrorCode.CONFLICT ? 409 : mapped.code === ErrorCode.NOT_FOUND ? 404 : 500;
-    response = { ...mapped, ...(env.isProduction ? {} : { details: { prismaCode: error.code } }) };
-    logLevel = statusCode >= 500 ? 'error' : 'warn';
+    statusCode =
+      mapped.code === ErrorCode.CONFLICT
+        ? 409
+        : mapped.code === ErrorCode.NOT_FOUND
+          ? 404
+          : 500;
+    response = {
+      ...mapped,
+      ...(env.isProduction ? {} : { details: { prismaCode: error.code } }),
+    };
+    logLevel = statusCode >= 500 ? "error" : "warn";
   } else if (error instanceof Prisma.PrismaClientValidationError) {
     statusCode = 400;
-    response = { code: ErrorCode.VALIDATION_ERROR, message: 'Invalid data supplied to the database layer' };
-    logLevel = 'warn';
+    response = {
+      code: ErrorCode.VALIDATION_ERROR,
+      message: "Invalid data supplied to the database layer",
+    };
+    logLevel = "warn";
   } else if (isJsonBodyError(error)) {
     statusCode = 400;
-    response = { code: ErrorCode.VALIDATION_ERROR, message: 'Malformed JSON body' };
-    logLevel = 'warn';
-  } else if ((error as { type?: string })?.type === 'entity.too.large') {
+    response = {
+      code: ErrorCode.VALIDATION_ERROR,
+      message: "Malformed JSON body",
+    };
+    logLevel = "warn";
+  } else if (error instanceof MulterError) {
+    statusCode = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    response = {
+      code:
+        error.code === "LIMIT_FILE_SIZE"
+          ? ErrorCode.PAYLOAD_TOO_LARGE
+          : ErrorCode.VALIDATION_ERROR,
+      message:
+        error.code === "LIMIT_FILE_SIZE"
+          ? "Attachment exceeds the configured size limit"
+          : "Malformed multipart upload",
+    };
+    logLevel = "warn";
+  } else if ((error as { type?: string })?.type === "entity.too.large") {
     statusCode = 413;
-    response = { code: ErrorCode.PAYLOAD_TOO_LARGE, message: 'Request payload too large' };
-    logLevel = 'warn';
+    response = {
+      code: ErrorCode.PAYLOAD_TOO_LARGE,
+      message: "Request payload too large",
+    };
+    logLevel = "warn";
   }
 
   const logPayload = {
@@ -123,7 +177,7 @@ export function errorHandler(
     err: error,
   };
 
-  if (logLevel === 'error') {
+  if (logLevel === "error") {
     logger.error(logPayload, response.message);
   } else {
     logger.warn(logPayload, response.message);

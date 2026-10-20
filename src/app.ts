@@ -112,12 +112,14 @@ export function createApp(): Express {
 
   // Local media is available only in non-production environments.
   if (storageConfig.provider === 'local' && !env.isProduction) {
+    const localMediaRoot = path.resolve(storageConfig.localDir ?? '.tmp/uploads');
     app.use(
-      '/media',
-      express.static(
-        path.resolve(storageConfig.localDir ?? '.tmp/uploads'),
-        { fallthrough: true },
-      ),
+      '/media/avatars',
+      express.static(path.join(localMediaRoot, 'avatars'), { fallthrough: true }),
+    );
+    app.use(
+      '/media/posts',
+      express.static(path.join(localMediaRoot, 'posts'), { fallthrough: true }),
     );
   }
 

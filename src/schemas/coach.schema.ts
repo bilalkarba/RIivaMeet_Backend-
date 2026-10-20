@@ -76,8 +76,8 @@ export const updateCoachProfileBodySchema = z
 
 export const replaceCoachSportsBodySchema = z
   .object({
-    sportIds: z.array(uuidSchema).min(1, 'Provide at least one sport').max(20).optional(),
-    sportSlugs: z.array(trimmedString(2, 60)).min(1, 'Provide at least one sport').max(20).optional(),
+    sportIds: z.array(uuidSchema).max(20).optional(),
+    sportSlugs: z.array(trimmedString(2, 60)).max(20).optional(),
   })
   .strict()
   .refine((data) => Boolean(data.sportIds) || Boolean(data.sportSlugs), {

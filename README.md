@@ -13,6 +13,8 @@ specification:
   matching ([details](#additional-product-features-phases-1-3)).
 * **Phase 2** - blocking, reporting and admin moderation, enforced in discovery.
 * **Phase 3** - private text chat with REST history and realtime Socket.IO delivery.
+* **Phase 4** - off-platform contact moderation for messages, plus private 1:1 audio/video
+  calls over WebRTC with server-issued STUN/TURN configuration.
 
 > The product-facing name is **RivaMeet**. Package names, folders and database objects keep
 the original `coachini` identifiers so nothing existing breaks.
@@ -22,7 +24,7 @@ the original `coachini` identifiers so nothing existing breaks.
 * **Validation:** Zod on every request body, query string and route parameter
 * **Auth:** JWT access tokens (HS256) + bcrypt password hashing + role-based authorization
 * **Docs:** OpenAPI 3.0 at `/docs` (Swagger UI) and `/docs.json`
-* **Tests:** Vitest + Supertest against a **real** PostgreSQL database (160 tests)
+* **Tests:** Vitest + Supertest against a **real** PostgreSQL database (226 tests)
 
 ---
 
@@ -134,10 +136,26 @@ a readable message when something is missing or invalid.
 | `STORAGE_LOCAL_DIR` | no | `.tmp/uploads` | Only used by `STORAGE_PROVIDER=local` (development/test) |
 | `SEED_DEMO_DATA` | no | `false` | When `true`, `npm run seed` also creates demo users, coaches, a booking and a review |
 | `SEED_DEMO_PASSWORD` | no | `Passw0rd123` | Password for the demo accounts |
+| `STORAGE_DOCUMENT_BUCKET` | recommended | `STORAGE_BUCKET` | Dedicated **private** bucket for verification documents (must not be publicly readable) |
+| `STORAGE_DOCUMENT_MAX_UPLOAD_BYTES` | no | `10485760` | Maximum size of one verification document (10 MB) |
+| `VERIFICATION_REQUIRED_DOCUMENT_TYPES` | no | `DIPLOMA,CERTIFICATION` | Document types that satisfy a submission. Empty = any one document |
 | `TEST_DATABASE_URL` | no | - | When set, tests run against this database instead of starting an embedded cluster |
 | `TEST_PG_PORT` | no | `55433` | First port tried for the embedded **test** cluster |
 | `EMBEDDED_PG_PORT` | no | `55432` | First port tried by `npm run db:start` / `npm run migrate:dev:local` |
 | `EMBEDDED_PG_USER` / `EMBEDDED_PG_PASSWORD` / `EMBEDDED_PG_DATABASE` | no | `coachini` | Embedded cluster credentials |
+| `MESSAGE_MODERATION_ENABLED` | no | `true` | Scan every REST/Socket.IO message for off-platform contact details |
+| `MESSAGE_MODERATION_POLICY` | no | `warn` | `warn` (deliver + warn) \| `block` (reject before persisting) \| `flag` (deliver + admin review queue) |
+| `CALL_RING_TIMEOUT_MS` | no | `45000` | How long the callee has to answer before the call is `MISSED` |
+| `CALL_DISCONNECT_GRACE_MS` | no | `15000` | Grace after the last socket drops before a call is ended (tab switch / short network loss) |
+| `CALL_MAX_DURATION_MINUTES` | no | `240` | Hard ceiling for a connected call, enforced by the stale-session sweep |
+| `CALL_INVITE_RATE_LIMIT_MAX` | no | `20` | Call invitations per account per rate-limit window |
+| `CALL_SIGNAL_RATE_LIMIT_MAX` | no | `300` | SDP/ICE signalling frames per account per `CALL_SIGNAL_RATE_LIMIT_WINDOW_MS` |
+| `CALL_SIGNAL_RATE_LIMIT_WINDOW_MS` | no | `60000` | Signalling rate-limit window |
+| `STUN_URLS` | no | `stun:stun.l.google.com:19302` | Comma-separated STUN URLs; empty disables STUN |
+| `TURN_URLS` | no | - | Comma-separated TURN URLs (`turn:host:3478?transport=udp`, `turns:host:5349`) |
+| `TURN_SHARED_SECRET` | no | - | TURN REST API shared secret (coturn `static-auth-secret`, Metered, ...) |
+| `TURN_USERNAME` / `TURN_CREDENTIAL` | no | - | Static TURN credentials for providers without the shared-secret scheme (Twilio, Cloudflare) |
+| `TURN_CREDENTIAL_TTL_SECONDS` | no | `3600` | Lifetime of minted TURN credentials |
 
 Generate a production secret with:
 
@@ -193,6 +211,11 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 | `Conversation` (`conversations`) | `bookingId?` (**unique**), `lastMessageAt?` | private 1:1 chat; booking conversations are unique per accepted booking |
 | `ConversationParticipant` (`conversation_participants`) | composite PK `(conversationId, userId)`, `lastReadAt?` | membership + unread tracking |
 | `Message` (`messages`) | `conversationId`, `senderId`, `body` | `CHECK` on body length (Phase 3) |
+| `MessageModerationFlag` (`message_moderation_flags`) | `messageId`, `conversationId`, `senderId`, `policy`, `matches`, `reviewedById?`, `reviewedAt?`, `reviewNote?` | detector kinds only, never the matched value; ADMIN-only |
+| `Call` (`calls`) | `conversationId`, `callerId`, `calleeId`, `type`, `status`, `startedAt`, `answeredAt?`, `endedAt?`, `endedById?` | metadata only - no media, SDP or ICE candidates |
+| `CoachVerification` (`coach_verifications`) | `coachProfileId` (**unique**), `status`, `submittedAt`, `reviewedById?`, `reviewedAt?`, `reviewNote?` | one application per coach; **the only source of truth for approval** |
+| `CoachVerificationDocument` (`coach_verification_documents`) | `verificationId`, `type`, `storageKey` (**unique**), `contentType`, `sizeBytes`, `isCurrent`, `confirmedAt?` | private object key + metadata only, never the bytes |
+| `CoachVerificationEvent` (`coach_verification_events`) | `verificationId`, `type`, `fromStatus?`, `toStatus?`, `actorUserId?`, `actorRole?`, `note?` | append-only audit trail |
 
 `User` also carries the athlete-facing profile fields added in Phase 1: `displayName?`,
 `avatarUrl?`, `bio?`, `city?`, `country?`, `level?`.
@@ -216,6 +239,9 @@ prisma/migrations/20261012234500_phase2_safety_constraints/ # hand-written invar
 prisma/migrations/20261012235122_phase3_chat/              # conversations + messages
 prisma/migrations/20261012235500_chat_constraints/         # hand-written invariants
 prisma/migrations/20261013030000_booking_conversations/    # optional unique booking link for chat
+prisma/migrations/20261014120000_calls/                    # call log + one active call per conversation
+prisma/migrations/20261016120000_coach_verification/       # coach verification + private documents (additive)
+prisma/migrations/20261019120000_message_moderation/       # moderation flags queue (additive)
 ```
 
 All migrations are additive: no table, column or row is ever dropped, so they can be
@@ -526,9 +552,242 @@ socket.emit('message:send', { conversationId, body: 'Hello' }, (ack) => console.
 socket.on('message:new', (message) => console.log(message));
 ```
 
-Unhandled concerns are unchanged: **no audio/video calls** are implemented (that needs a
-real WebRTC/SFU provider) and no message is ever reported as "delivered" unless it was
-actually persisted.
+No message is ever reported as "delivered" unless it was actually persisted. Audio/video
+calls and off-platform contact moderation are described below.
+
+### Message moderation (off-platform contact sharing)
+
+Every message - REST **and** Socket.IO - passes through `chat.service.sendMessage`, which
+runs `moderation.service` *before* the row is inserted and before anything is broadcast. A
+client therefore cannot bypass moderation by switching transport, and a blocked message is
+never persisted.
+
+Detected contact formats:
+
+* phone numbers in local and international forms, with spaces, dots, dashes, parentheses or
+  slashes, including Arabic-Indic digits and `0049 (0) …`;
+* email addresses, including `[at]` / `(at)` / `[dot]` and spaced variants;
+* WhatsApp, Facebook/Messenger, Instagram and Telegram links (including `wa.me`, `fb.me`,
+  `t.me`, `instagr.am` and `domain[.]com` obfuscation);
+* other social profile URLs (LinkedIn, TikTok, Snapchat, X/Twitter, Discord, YouTube, ...);
+* social handles introduced by a network name (`telegram: @name`). A plain `@coach` mention
+  is **not** flagged.
+
+False positives are avoided by looking for contact *formats* rather than words: dates
+(`2026-10-19`), times (`10:00`), prices (`€45`), sets/reps (`3 sets of 12 at 60 kg`) and
+normal coaching discussion are not matched. Detection never echoes the matched value -
+warnings and flags contain only the detector kind and label.
+
+Policy (`MESSAGE_MODERATION_POLICY`):
+
+| Policy | Behaviour |
+| --- | --- |
+| `warn` (default) | Persist and deliver the message; the sender receives a warning |
+| `block` | Reject with `400 VALIDATION_ERROR` + `details.moderation`; nothing is stored or broadcast |
+| `flag` | Persist and deliver the message, and create an admin review row in the same transaction |
+
+Existing messages are never deleted, rewritten or scanned again. `MESSAGE_MODERATION_ENABLED=false`
+disables the check without a deploy. The frontend reads the active policy from
+`GET /api/v1/conversations/moderation-policy` and only blocks locally under `block`; `warn`
+and `flag` messages are sent and the server outcome drives the toast. Every path is still
+re-validated server-side.
+
+Administrators review flagged messages (ADMIN-only):
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/v1/admin/message-flags` | Queue, filter `reviewed=true\|false`, paginated |
+| `PATCH` | `/api/v1/admin/message-flags/{id}/review` | Record reviewer, timestamp, optional note |
+
+The flag row stores detector kinds/labels only - never the phone number, email address or
+profile URL.
+
+### Audio / video calls (WebRTC)
+
+Calls are available **only inside a booking conversation** whose status is `ACCEPTED` or
+`COMPLETED`, between its two participants. Membership, the block relation and the call role
+are re-checked on every invite and every signalling frame. Media is peer-to-peer; the server
+relays SDP/ICE but never stores or records it. `GET /api/v1/calls/config` returns the ICE
+servers plus `ringTimeoutMs` and `disconnectGraceMs`.
+
+Lifecycle: `RINGING -> ACCEPTED -> ENDED`, plus `REJECTED`, `MISSED` (ring timeout / callee
+unreachable) and `CANCELLED` (caller hangs up while ringing). At most one live call exists per
+user and per conversation; the database enforces the per-conversation rule with a partial
+unique index. On boot and every 60 s, a sweep marks stale `RINGING` calls `MISSED` and closes
+`ACCEPTED` calls older than `CALL_MAX_DURATION_MINUTES`.
+
+Reconnection and ICE recovery:
+
+* a dropped signalling socket is **not** a hang-up: the server waits
+  `CALL_DISCONNECT_GRACE_MS` and only ends the call if the user still has no sockets;
+* the client shows a `reconnecting` phase, reconnects the socket automatically and restores
+  the call instead of tearing media down;
+* a transient peer-connection `disconnected` waits before recovery; `failed` recovers
+  immediately; the callee (the offerer in this flow) performs ICE restarts on request, with
+  up to three attempts before reporting `call.connectionFailed`;
+* hiding a tab or changing OS focus never ends a call. Browsers may still throttle timers or
+  suspend background media - background-call continuity is **not** promised or simulated.
+
+#### STUN / TURN configuration
+
+```bash
+# Public STUN is enough for most home networks. Nothing secret lives here.
+STUN_URLS=stun:stun.l.google.com:19302
+
+# TURN is required when both peers are behind symmetric NAT / restrictive firewalls.
+TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349
+
+# Preferred: TURN REST API shared secret (coturn static-auth-secret, Metered, ...).
+# The API mints short-lived <expiry>:<userId> credentials with HMAC-SHA1 per request;
+# the secret itself never reaches the browser.
+TURN_SHARED_SECRET=<long-random-secret>
+TURN_CREDENTIAL_TTL_SECONDS=3600
+
+# Alternative for providers without the shared-secret scheme (Twilio, Cloudflare):
+# TURN_USERNAME=...
+# TURN_CREDENTIAL=...
+```
+
+Rules enforced at startup:
+
+* `TURN_URLS` requires exactly one credential scheme - either `TURN_SHARED_SECRET` or both
+  `TURN_USERNAME` and `TURN_CREDENTIAL`; the process refuses to boot otherwise;
+* credentials without `TURN_URLS` are rejected;
+* `STUN_URLS`/`TURN_URLS` are server-side only. Never put TURN secrets in
+  `frontend/src/environments/*` or a `VITE_*`/`NG_APP_*` variable - anything bundled there
+  is public. The browser only ever receives the per-request `iceServers` array from the
+  authenticated API, and TURN credentials are never logged.
+
+coturn example:
+
+```conf
+listening-port=3478
+tls-listening-port=5349
+use-auth-secret
+static-auth-secret=<same value as TURN_SHARED_SECRET>
+realm=rivameet.example.com
+min-port=49160
+max-port=49200
+```
+
+#### Production deployment
+
+The signalling design targets a **single API process**: the live-call registry and Socket.IO
+(and its rate-limit windows) are in memory. If you run more than one replica, add the
+Socket.IO Redis adapter and move the registry/sweep to shared storage first; otherwise two
+replicas can each accept a call for the same conversation (the database index still rejects
+the second insert, but lifecycle timers would be split). Sticky sessions alone are not a
+substitute.
+
+Checklist:
+
+1. Put the API behind a proxy/load balancer that forwards WebSocket upgrades on
+   `/socket.io` and allows long-lived connections (idle timeout ≥ 5 minutes).
+2. Open TURN `3478/udp` and `3478/tcp` (plus `5349/tcp` for `turns:`) and the relay port
+   range (`49160-49200` in the example) between the TURN server and clients.
+3. Set `FRONTEND_URL` to the exact deployed origin(s) - Socket.IO uses the same allow-list.
+4. Set `TRUST_PROXY` to the number of proxy hops so rate limiting sees real client IPs.
+5. Verify: two accounts, an accepted booking, a call on Wi-Fi, then repeat with one peer on
+   a mobile hotspot; if it only connects with TURN, check the TURN URL/TTL and relay ports.
+6. Keep `JWT_SECRET`, `TURN_SHARED_SECRET` and storage keys in the platform secret manager;
+   never in git, the frontend bundle or log output.
+
+---
+
+## Coach verification
+
+A coach becomes publicly discoverable and bookable **only** when their verification
+application is `APPROVED` *and* the profile satisfies the existing publication rules
+(coordinates + at least one sport). The gate is enforced server-side in discovery, the
+public profile endpoint and booking creation - hiding UI controls is never the boundary.
+
+### Lifecycle
+
+```
+DRAFT --submit--> PENDING --markInReview--> IN_REVIEW --approve--> APPROVED
+  ^                 |                            |--reject--> REJECTED --resubmit--> PENDING
+  |                 |--requestInfo--> NEEDS_INFO --+                         ^
+  +--------- upload/remove documents --------+----- resubmit ----------------+
+```
+
+| Status | Meaning |
+| --- | --- |
+| `DRAFT` | Documents can still be changed; not visible to administrators as work |
+| `PENDING` | Submitted and awaiting review (documents locked) |
+| `IN_REVIEW` | An administrator is reviewing it |
+| `NEEDS_INFO` | More or corrected documents are required (the coach can edit and resubmit) |
+| `APPROVED` | Verified by an administrator |
+| `REJECTED` | Refused with a reason; the coach can correct and resubmit |
+
+Every status change is recorded in the append-only event history. Only an ADMIN can approve
+or reject an account after manually reviewing the submitted documents.
+
+### Frontend
+
+* **Coach studio** (`/coach/dashboard`) gained a **Verification** tab: status and what it
+  means for visibility, required-document checklist, upload with progress (validation errors
+  surfaced verbatim), document list with remove, submit/resubmit, reviewer feedback and the
+  audit history.
+* **Admin queue** (`/admin/verifications`) lists applications with status/date filters and
+  pagination, shows coach details, streams private documents, displays review history, and
+  offers mark-in-review / approve / reject / request-info behind an explicit note-backed
+  confirmation. A second view lists published-but-unverified coaches so
+  they can be recorded as manually approved.
+* Routes are guarded by a client-side `adminGuard`, and every `/admin/*` request is
+  re-authorized server-side, so the guard is convenience only.
+* All copy ships in English, French and Arabic (RTL).
+
+### Coach endpoints
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/coaches/me/verification` | COACH | Application, documents, reviewer feedback, history |
+| `GET` | `/api/v1/coaches/me/verification/status` | COACH | Official status + whether the profile is publicly visible |
+| `POST` | `/api/v1/coaches/me/verification/documents` | COACH | Presigned **private** upload target (server-generated key) |
+| `POST` | `/api/v1/coaches/me/verification/documents/{documentId}/confirm` | COACH | Verifies existence, size and real file type |
+| `DELETE` | `/api/v1/coaches/me/verification/documents/{documentId}` | COACH | Remove a document while the application is editable |
+| `POST` | `/api/v1/coaches/me/verification/submit` | COACH | Submit/resubmit (checks the configured document requirements) |
+
+### Admin endpoints (all ADMIN-only)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/v1/admin/verifications` | Queue with `status`, `coachProfileId`, `submittedFrom/To`, pagination |
+| `GET` | `/api/v1/admin/verifications/unverified-coaches` | Published coaches without approval (rollout queue) |
+| `GET` | `/api/v1/admin/verifications/{id}` | Detail: documents, reviewer, audit history |
+| `GET` | `/api/v1/admin/verifications/documents/{documentId}/file` | Streams the private document (`no-store`, never a public URL) |
+| `PATCH` | `/api/v1/admin/verifications/{id}/in-review` | `PENDING` -> `IN_REVIEW` |
+| `PATCH` | `/api/v1/admin/verifications/{id}/approve` | `PENDING`/`IN_REVIEW` -> `APPROVED` (does **not** publish the profile) |
+| `PATCH` | `/api/v1/admin/verifications/{id}/reject` | `-> REJECTED` (reason required) |
+| `PATCH` | `/api/v1/admin/verifications/{id}/request-info` | `-> NEEDS_INFO` (note required) |
+| `POST` | `/api/v1/admin/verifications/grandfather` | Manual, auditable approval for coaches that predate verification |
+
+### Document handling
+
+* Keys are always server-generated (`verifications/<verificationId>/<uuid>.<ext>`), so a
+  client filename can never influence the storage path (no traversal, no cross-application
+  overwrite).
+* Only `application/pdf`, `image/jpeg` and `image/png` are accepted, and the stored bytes
+  are re-checked against their **file signature** on confirm - a renamed file is rejected
+  and discarded.
+* Documents are never served from a public URL: admins receive them through an
+  authenticated, `Cache-Control: no-store` API stream.
+* `STORAGE_PROVIDER=local` (development/test) refuses to run in production; production must
+  use an S3-compatible bucket, ideally a dedicated private one (`STORAGE_DOCUMENT_BUCKET`).
+* Unconfirmed uploads older than an hour are cleaned up on the next upload attempt.
+
+### Rollout: existing coaches
+
+No coach is auto-approved. The additive migration creates the tables and nothing else, so a
+coach that predates verification simply has no application and is therefore **not**
+discoverable until an administrator reviews them:
+
+1. deploy the migration while the queues are otherwise quiet;
+2. open `/admin/verifications/unverified-coaches`;
+3. for each known coach, use **Record manual approval** (stores reviewer, timestamp and a
+   reason) - or ask them to upload their diploma like a new coach;
+4. the coach reappears in search as soon as their application is `APPROVED` (and their
+   profile is still published with coordinates + at least one sport).
 
 ---
 
@@ -585,6 +844,18 @@ extensions (self-managed PostgreSQL, or a provider that allows it).
   100 kB, `X-Powered-By` disabled.
 * **Rate limiting:** global limiter plus a stricter one for authentication endpoints;
   `/health` is exempt so platform probes are never throttled.
+* **Chat and call authorization:** conversation membership, the block relation and the
+  booking status are re-checked on every REST request and every Socket.IO event. Signal
+  frames are only relayed between the two participants of a live call; the caller cannot
+  choose the recipient. Conversation rooms are joined server-side only after a membership
+  check, and call events go to private `user:<id>` rooms that a client cannot join itself.
+* **Secrets:** `JWT_SECRET`, `TURN_SHARED_SECRET`/static TURN credentials and storage keys
+  live in server environment variables only. The Angular bundle contains no credentials;
+  the browser receives short-lived, per-request ICE credentials. Signal payloads are never
+  persisted or logged, and moderation warnings/flags never repeat the matched value.
+* **Abuse limits:** chat messages, call invitations and signalling frames each have a
+  per-account budget, separate from the global HTTP limiter; every socket event payload is
+  Zod-validated and signalling data is capped at 64 KB.
 * **Logging:** Pino with redaction of `Authorization`, cookies, `password` and tokens;
   errors are logged with the request id and full detail server-side while clients get a
   generic message.
@@ -616,7 +887,7 @@ Requirements: tests need a **real PostgreSQL**. Two modes:
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coachini_test npm test
 ```
 
-Coverage (**98 tests, 0 failures**):
+Coverage (**226 tests, 0 failures**):
 
 | Suite | Tests |
 | --- | --- |
@@ -627,12 +898,17 @@ Coverage (**98 tests, 0 failures**):
 | `tests/integration/profile.test.ts` | 13 |
 | `tests/integration/safety.test.ts` | 11 |
 | `tests/integration/matching.test.ts` | 7 |
-| `tests/integration/chat.test.ts` | 9 |
-| `tests/integration/realtime.test.ts` | 4 |
+| `tests/integration/chat.test.ts` | 12 |
+| `tests/integration/realtime.test.ts` | 7 |
+| `tests/integration/calls.test.ts` | 18 |
+| `tests/integration/moderation.test.ts` | 5 |
 | `tests/integration/storage.test.ts` | 4 |
 | `tests/integration/storage-local.test.ts` | 4 |
 | `tests/unit/storage.test.ts` | 8 |
 | `tests/unit/geo.test.ts` | 9 |
+| `tests/integration/verification.test.ts` | 21 |
+| `tests/unit/ai-analysis.test.ts` | 13 |
+| `tests/unit/moderation.test.ts` | 9 |
 
 What those tests verify:
 
@@ -645,6 +921,10 @@ What those tests verify:
 | Coach search | published-only, sport (slug + name), city/neighborhood, price range, `minRating`, combined filters, radius + `distanceKm`, sorting by distance/price/rating, pagination metadata, 13 invalid-parameter cases |
 | Distance | SQL vs. JavaScript Haversine parity, radius exclusion, sort order |
 | Profile management | publish requires coordinates + at least one sport, duplicate profile 409, partial updates, sports add/replace/remove, availability overlap 409, unknown sport 400 |
+| Verification | lifecycle (submit -> in review -> approve/reject/needs-info), document requirements, upload confirmation including the file-signature check, cross-coach ownership (IDOR) rejection, admin-only review, audit history, grandfathered approval |
+| Verification enforcement | unverified coaches are absent from search, suggestions, sport counts, public detail and booking creation; approval alone never publishes a profile |
+| Message moderation | phone/email/social/obfuscated detection, ordinary-coaching false positives, policy mapping (warn/block/flag), no matched value echoed, REST + Socket.IO enforcement, authenticated policy endpoint, ADMIN-only flag review |
+| Calls | handshake auth, participant/booking/block authorization, incoming delivery only to the callee, accept/reject/end lifecycle, ring timeout, disconnect grace and reconnect, ICE restart relay, signalling size/rate limits, call log access |
 | Bookings | price snapshot (incl. later price change), future-only, availability fit, unpublished coach 404, session length bounds, client overlap 409 |
 | Overlap prevention | accepted overlaps rejected with the conflicting booking id, back-to-back slots allowed, slot reusable after cancellation, **concurrent accepts produce exactly one success** |
 | Transitions | accept/reject/cancel/complete ownership rules and terminal-state 409s |
@@ -733,7 +1013,41 @@ config). Verify with:
 curl -i -H "Origin: https://app.coachini.com" https://<your-service>/health | grep -i access-control
 ```
 
-### 6. Graceful shutdown
+### 6. Coach verification: safe deployment order
+
+The backend runs on Railway and the frontend on Vercel. Verification adds a schema change
+and requires private document storage, so deploy in this order:
+
+1. **Configure private document storage.** Set `STORAGE_PROVIDER=s3` with
+   `STORAGE_BUCKET`/`STORAGE_REGION`/`STORAGE_ACCESS_KEY_ID`/`STORAGE_SECRET_ACCESS_KEY`
+   (plus `STORAGE_ENDPOINT`/`STORAGE_FORCE_PATH_STYLE` for non-AWS providers) and, strongly
+   recommended, a dedicated **private** `STORAGE_DOCUMENT_BUCKET`. The bucket must not allow
+   anonymous `GetObject` (the API still never returns a public URL for a document, but the
+   bucket policy is the second line of defence).
+2. **Back up the database** (Railway: create a manual backup / snapshot of the PostgreSQL
+   service).
+3. **Apply the additive migration** as a one-off Railway job using the same image and
+   variables as the service:
+
+   ```bash
+   npx prisma migrate deploy
+   ```
+
+   It only creates `coach_verifications`, `coach_verification_documents`,
+   `coach_verification_events` and four enums; no table, column or row is dropped or
+   rewritten, so it is safe to run against production data. Do **not** run
+   `prisma migrate reset` or any `db push` variant.
+4. **Deploy the backend**, then check `/health` and `/docs.json`
+   (`paths` should include `/api/v1/admin/verifications`).
+5. **Deploy the frontend** (Vercel build; the API base URL stays in
+   `frontend/src/environments/environment*.ts`).
+6. **Verify with one test coach**: register as COACH, upload a diploma, submit, review it in
+   `/admin/verifications`, then confirm the coach appears in search only after approval.
+7. **Verify the logs** contain no document contents, signed URLs or credentials, then work
+   through `/admin/verifications/unverified-coaches` to review coaches that predate the
+   feature.
+
+### 7. Graceful shutdown
 
 `src/server.ts` handles `SIGTERM`/`SIGINT`: it stops accepting connections, waits up to 10 s
 for in-flight requests, disconnects Prisma, and exits. Rolling deploys therefore do not drop
@@ -826,7 +1140,8 @@ requests.
 ## Known limitations and notes
 
 * **Later phases are not implemented yet.** Community feed/posts, events and challenges,
-  mentorship, push notifications, the Angular admin back-office, the Flutter Android app
+  mentorship, push notifications, the rest of the Angular admin back-office (only the coach
+  verification queue exists today), the Flutter Android app
   and payments (Phases 4-10 of the specification) are **not** built. The report at the end
   of the working session lists them with the intended approach. There is no fake data or
   simulated external delivery anywhere in the implemented phases.

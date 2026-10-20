@@ -4,7 +4,13 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import 'dotenv/config';
 
 import { PrismaClient } from '../src/generated/prisma/client.js';
-import { BookingStatus, ExperienceLevel, Role } from '../src/generated/prisma/enums.js';
+import {
+  BookingStatus,
+  ExperienceLevel,
+  Role,
+  VerificationEventType,
+  VerificationStatus,
+} from '../src/generated/prisma/enums.js';
 
 /**
  * Database seed.
@@ -153,6 +159,32 @@ export async function seedDemoData(client: PrismaClient, sportIdsBySlug: Map<str
     });
 
     createdCoachProfileId ??= profile.id;
+
+    // Discovery and bookings require an APPROVED verification. Demo data is explicitly
+    // labelled and pre-approved so `SEED_DEMO_DATA=true` produces a usable catalogue; the
+    // production seed (sports only) approves nobody.
+    await client.coachVerification.upsert({
+      where: { coachProfileId: profile.id },
+      update: { status: VerificationStatus.APPROVED, reviewedById: admin.id, reviewedAt: new Date() },
+      create: {
+        coachProfileId: profile.id,
+        status: VerificationStatus.APPROVED,
+        submittedAt: new Date(),
+        lastSubmittedAt: new Date(),
+        reviewedById: admin.id,
+        reviewedAt: new Date(),
+        reviewNote: 'Demo data: verified by the seed script.',
+        events: {
+          create: {
+            type: VerificationEventType.APPROVED,
+            toStatus: VerificationStatus.APPROVED,
+            actorUserId: admin.id,
+            actorRole: Role.ADMIN,
+            note: 'Demo data: verified by the seed script.',
+          },
+        },
+      },
+    });
 
     for (const slug of coach.sportSlugs) {
       const sportId = sportIdsBySlug.get(slug);

@@ -94,6 +94,54 @@ export async function registerAdmin(options: { email?: string } = {}): Promise<T
   return { id: login.body.data.user.id, email, token: login.body.data.accessToken, role: 'ADMIN' };
 }
 
+/**
+ * An ADMIN row used by test setup (verification approval). Public registration refuses the
+ * ADMIN role, so it is created directly; the password hash is never used to sign in.
+ */
+export async function ensureVerificationAdmin(): Promise<string> {
+  const admin = await prisma.user.upsert({
+    where: { email: 'verification-admin@coachini.test' },
+    update: {},
+    create: {
+      email: 'verification-admin@coachini.test',
+      passwordHash: 'test-setup-only-not-a-real-hash',
+      name: 'Verification Admin',
+      role: 'ADMIN',
+    },
+    select: { id: true },
+  });
+  return admin.id;
+}
+
+/**
+ * Mark a coach as verified.
+ *
+ * Discovery and booking now require an APPROVED verification application, so any test
+ * that needs a *visible* coach approves one here just like an administrator would.
+ * `createCoach` calls this by default; pass `approved: false` to test the gate itself.
+ */
+export async function approveVerification(
+  coachProfileId: string,
+  options: { adminId?: string; note?: string } = {},
+): Promise<void> {
+  const reviewedById = options.adminId ?? (await ensureVerificationAdmin());
+  const note = options.note ?? 'Approved during test setup';
+
+  await prisma.coachVerification.upsert({
+    where: { coachProfileId },
+    update: { status: 'APPROVED', reviewedById, reviewedAt: new Date(), reviewNote: note },
+    create: {
+      coachProfileId,
+      status: 'APPROVED',
+      submittedAt: new Date(),
+      lastSubmittedAt: new Date(),
+      reviewedById,
+      reviewedAt: new Date(),
+      reviewNote: note,
+    },
+  });
+}
+
 export interface CreateCoachOptions {
   city?: string;
   neighborhood?: string;
@@ -102,6 +150,8 @@ export interface CreateCoachOptions {
   hourlyPrice?: number;
   sports?: string[];
   published?: boolean;
+  /** Whether the coach is verified. Defaults to the `published` value. */
+  approved?: boolean;
   bio?: string;
   certifications?: string[];
   experienceLevel?: 'BEGINNER' | 'INTERMEDIATE' | 'ADVANCED' | 'PROFESSIONAL';
@@ -181,6 +231,11 @@ export async function createCoach(options: CreateCoachOptions = {}): Promise<Tes
     if (publishResponse.status !== 200) {
       throw new Error(`publishing failed (${publishResponse.status}): ${JSON.stringify(publishResponse.body)}`);
     }
+  }
+
+  // A published coach is verified by default: discovery and bookings require APPROVED.
+  if (options.approved ?? published) {
+    await approveVerification(coachProfileId);
   }
 
   return { ...user, coachProfileId, hourlyPrice };

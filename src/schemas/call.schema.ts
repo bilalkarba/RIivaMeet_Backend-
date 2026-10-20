@@ -34,7 +34,8 @@ export const callSignalSchema = z
   .object({
     callId: uuidSchema,
     /// Discriminator so the peer knows how to consume `data` (offer | answer | candidate).
-    kind: z.enum(['offer', 'answer', 'candidate']),
+    /// `restart-request` asks the original offerer to send a fresh ICE-restart offer.
+    kind: z.enum(['offer', 'answer', 'candidate', 'restart-request']),
     data: z.unknown(),
   })
   .strict()

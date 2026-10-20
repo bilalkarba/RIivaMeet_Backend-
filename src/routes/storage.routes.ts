@@ -79,7 +79,10 @@ router.post('/uploads', authenticate, validate({ body: createUploadBodySchema })
  */
 router.put(
   '/local',
-  express.raw({ type: () => true, limit: storageConfig.maxUploadBytes }),
+  express.raw({
+    type: () => true,
+    limit: Math.max(storageConfig.maxUploadBytes, storageConfig.documentMaxUploadBytes),
+  }),
   validate({ query: localUploadQuerySchema }),
   storageController.localUpload,
 );

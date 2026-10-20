@@ -1,6 +1,6 @@
 import { prisma } from '../config/prisma.js';
 import { Prisma } from '../generated/prisma/client.js';
-import { BookingStatus, NotificationType, Role } from '../generated/prisma/enums.js';
+import { BookingStatus, NotificationType, Role, VerificationStatus } from '../generated/prisma/enums.js';
 import type { CreateBookingBody, ListBookingsQuery } from '../schemas/booking.schema.js';
 import type { AuthenticatedUser } from '../utils/jwt.js';
 import { ApiError } from '../utils/errors.js';
@@ -64,8 +64,14 @@ export async function createBooking(clientId: string, input: CreateBookingBody):
     throw ApiError.badRequest('startAt must be in the future', { startAt: input.startAt });
   }
 
+  // A booking can only be requested from a published *and verified* coach. A client cannot
+  // bypass verification by calling this endpoint directly (the same gate as discovery).
   const coach = await prisma.coachProfile.findFirst({
-    where: { id: input.coachProfileId, isPublished: true },
+    where: {
+      id: input.coachProfileId,
+      isPublished: true,
+      verification: { is: { status: VerificationStatus.APPROVED } },
+    },
     select: { id: true, userId: true, hourlyPrice: true },
   });
 

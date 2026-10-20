@@ -95,6 +95,16 @@ export function getRingTimeoutMs(): number {
   return env.CALL_RING_TIMEOUT_MS;
 }
 
+/** How long a dropped socket may stay away before the server ends the call. */
+export function getDisconnectGraceMs(): number {
+  return env.CALL_DISCONNECT_GRACE_MS;
+}
+
+/** Hard ceiling for a connected call; used by the stale-session sweep. */
+export function getMaxCallDurationMs(): number {
+  return env.CALL_MAX_DURATION_MINUTES * 60_000;
+}
+
 // --- Authorization ----------------------------------------------------------
 
 /**
@@ -386,7 +396,11 @@ export function getIceServers(userId: string): IceServerResponse[] {
 }
 
 export function getCallConfig(userId: string): CallConfigResponse {
-  return { iceServers: getIceServers(userId), ringTimeoutMs: getRingTimeoutMs() };
+  return {
+    iceServers: getIceServers(userId),
+    ringTimeoutMs: getRingTimeoutMs(),
+    disconnectGraceMs: getDisconnectGraceMs(),
+  };
 }
 
 // --- History ----------------------------------------------------------------
@@ -419,15 +433,38 @@ export async function listConversationCalls(
 }
 
 /**
- * Close out calls left mid-flight by a previous process (crash / deploy).
+ * Close out calls left mid-flight by a previous process (crash / deploy) or by a client
+ * that vanished without signalling.
  *
  * Without this, a restart would leave rows stuck in RINGING forever and the partial
  * unique index would block every future call in that conversation.
+ *
+ * The cut-offs are deliberately separate:
+ *  - RINGING older than the ring timeout is MISSED (the timer is per process, so a
+ *    deploy can lose it);
+ *  - ACCEPTED older than the hard duration ceiling is ENDED (a crashed browser can never
+ *    hold a session open forever).
+ *
+ * A temporary socket drop is NOT handled here: the socket layer waits
+ * `CALL_DISCONNECT_GRACE_MS` first, so a tab switch or a quick reconnect keeps the call.
  */
-export async function reconcileStaleCalls(): Promise<number> {
-  const result = await prisma.call.updateMany({
-    where: { status: { in: ['RINGING', 'ACCEPTED'] } },
-    data: { status: 'MISSED', endedAt: new Date() },
-  });
-  return result.count;
+export async function reconcileStaleCalls(now = new Date()): Promise<number> {
+  const [ringing, accepted] = await Promise.all([
+    prisma.call.updateMany({
+      where: {
+        status: 'RINGING',
+        startedAt: { lt: new Date(now.getTime() - getRingTimeoutMs()) },
+      },
+      data: { status: 'MISSED', endedAt: now },
+    }),
+    prisma.call.updateMany({
+      where: {
+        status: 'ACCEPTED',
+        startedAt: { lt: new Date(now.getTime() - getMaxCallDurationMs()) },
+      },
+      data: { status: 'ENDED', endedAt: now },
+    }),
+  ]);
+
+  return ringing.count + accepted.count;
 }

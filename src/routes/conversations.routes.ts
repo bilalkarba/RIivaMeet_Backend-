@@ -1,19 +1,23 @@
-import { Router } from 'express';
-import { z } from 'zod';
+import { Router } from "express";
+import { z } from "zod";
 
-import * as callController from '../controllers/call.controller.js';
-import * as chatController from '../controllers/chat.controller.js';
-import { authenticate } from '../middleware/authenticate.js';
-import { chatRateLimiter } from '../middleware/rateLimit.js';
-import { validate } from '../middleware/validate.js';
-import { listCallsQuerySchema } from '../schemas/call.schema.js';
-import { uuidSchema } from '../schemas/common.schema.js';
+import * as callController from "../controllers/call.controller.js";
+import * as chatController from "../controllers/chat.controller.js";
+import { authenticate } from "../middleware/authenticate.js";
+import { chatAttachmentUpload } from "../middleware/chatAttachmentUpload.js";
+import { chatRateLimiter } from "../middleware/rateLimit.js";
+import { validate } from "../middleware/validate.js";
+import { listCallsQuerySchema } from "../schemas/call.schema.js";
+import { uuidSchema } from "../schemas/common.schema.js";
 import {
   listConversationsQuerySchema,
   listMessagesQuerySchema,
+  messageParamsSchema,
   sendMessageBodySchema,
   startConversationBodySchema,
-} from '../schemas/chat.schema.js';
+  updateMessageBodySchema,
+  uploadAttachmentBodySchema,
+} from "../schemas/chat.schema.js";
 
 const router = Router();
 
@@ -71,8 +75,16 @@ const bookingConversationParamSchema = z.object({ bookingId: uuidSchema });
  *       403: { $ref: '#/components/responses/Forbidden' }
  *       404: { $ref: '#/components/responses/NotFound' }
  */
-router.get('/', validate({ query: listConversationsQuerySchema }), chatController.listConversations);
-router.post('/', validate({ body: startConversationBodySchema }), chatController.startConversation);
+router.get(
+  "/",
+  validate({ query: listConversationsQuerySchema }),
+  chatController.listConversations,
+);
+router.post(
+  "/",
+  validate({ body: startConversationBodySchema }),
+  chatController.startConversation,
+);
 /**
  * @openapi
  * /api/v1/conversations/booking/{bookingId}:
@@ -95,10 +107,39 @@ router.post('/', validate({ body: startConversationBodySchema }), chatController
  *       409: { description: Booking is not accepted }
  */
 router.post(
-  '/booking/:bookingId',
+  "/booking/:bookingId",
   validate({ params: bookingConversationParamSchema }),
   chatController.openBookingConversation,
 );
+
+/**
+ * @openapi
+ * /api/v1/conversations/moderation-policy:
+ *   get:
+ *     tags: [Chat]
+ *     summary: Active message-moderation policy
+ *     description: >-
+ *       Tells the client whether off-platform contact details are blocked or merely
+ *       warned/flagged, so the composer can mirror the server. This is advisory only:
+ *       every message is still moderated server-side.
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Moderation policy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     enabled: { type: boolean }
+ *                     policy: { type: string, enum: [warn, block, flag] }
+ *       401: { $ref: '#/components/responses/Unauthorized' }
+ */
+router.get("/moderation-policy", chatController.moderationPolicy);
+router.get("/attachment-config", chatController.attachmentConfig);
 
 /**
  * @openapi
@@ -128,7 +169,8 @@ router.post(
  *     summary: Send a message (members only)
  *     description: >-
  *       Persists the message and broadcasts it over Socket.IO to the conversation room.
- *       Blocked participants cannot message each other (403). Rate limited per account.
+ *       Contact-sharing messages are rejected before persistence (422); blocked
+ *       participants cannot message each other (403). Rate limited per account.
  *     security: [{ bearerAuth: [] }]
  *     parameters:
  *       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
@@ -148,19 +190,114 @@ router.post(
  *           application/json:
  *             schema: { type: object, properties: { data: { $ref: '#/components/schemas/Message' } } }
  *       403: { $ref: '#/components/responses/Forbidden' }
+ *       422: { description: Contact-sharing policy violation; message is not stored or broadcast }
  *       429: { $ref: '#/components/responses/RateLimited' }
  */
 router.get(
-  '/:id/messages',
-  validate({ params: conversationIdParamSchema, query: listMessagesQuerySchema }),
+  "/:id/messages",
+  validate({
+    params: conversationIdParamSchema,
+    query: listMessagesQuerySchema,
+  }),
   chatController.listMessages,
 );
 router.post(
-  '/:id/messages',
+  "/:id/messages",
   chatRateLimiter,
   validate({ params: conversationIdParamSchema, body: sendMessageBodySchema }),
   chatController.sendMessage,
 );
+/**
+ * @openapi
+ * /api/v1/conversations/{id}/attachments:
+ *   post:
+ *     tags: [Chat]
+ *     summary: Upload a private chat attachment and send it as a message
+ *     description: >-
+ *       Accepts one JPEG, PNG, WebP, or PDF (at most the configured upload limit).
+ *       The caller must be a conversation participant. Bytes are signature-checked,
+ *       stored privately, and broadcast only after the message transaction succeeds.
+ *       `body` is an optional caption and is subject to contact-sharing moderation.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file, clientUploadId]
+ *             properties:
+ *               file: { type: string, format: binary }
+ *               body: { type: string, maxLength: 4000 }
+ *               clientUploadId: { type: string, format: uuid }
+ *     responses:
+ *       201: { description: Persisted and broadcast attachment message }
+ *       400: { $ref: '#/components/responses/ValidationError' }
+ *       403: { $ref: '#/components/responses/Forbidden' }
+ *       413: { description: Upload exceeds the configured attachment size limit }
+ *       422: { description: Prohibited caption; no file or message is stored }
+ */
+router.post(
+  "/:id/attachments",
+  chatRateLimiter,
+  validate({ params: conversationIdParamSchema }),
+  chatController.assertAttachmentMembership,
+  chatAttachmentUpload,
+  validate({
+    params: conversationIdParamSchema,
+    body: uploadAttachmentBodySchema,
+  }),
+  chatController.sendAttachment,
+);
+router.get(
+  "/:id/messages/:messageId/attachment",
+  validate({ params: messageParamsSchema }),
+  chatController.downloadAttachment,
+);
+router.patch(
+  "/:id/messages/:messageId",
+  chatRateLimiter,
+  validate({ params: messageParamsSchema, body: updateMessageBodySchema }),
+  chatController.updateMessage,
+);
+router.delete(
+  "/:id/messages/:messageId",
+  chatRateLimiter,
+  validate({ params: messageParamsSchema }),
+  chatController.deleteMessage,
+);
+
+/**
+ * @openapi
+ * /api/v1/conversations/{id}/messages/{messageId}:
+ *   patch:
+ *     tags: [Chat]
+ *     summary: Edit the authenticated user's message
+ *     description: Only the original sender may edit. Message length and contact-sharing moderation are enforced.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+ *       - { in: path, name: messageId, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200: { description: Updated message }
+ *       403: { $ref: '#/components/responses/Forbidden' }
+ *       404: { $ref: '#/components/responses/NotFound' }
+ *       422: { description: Invalid or prohibited message content }
+ *   delete:
+ *     tags: [Chat]
+ *     summary: Delete the authenticated user's message
+ *     description: Only the original sender may delete the message.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+ *       - { in: path, name: messageId, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200: { description: Deleted message identifier }
+ *       403: { $ref: '#/components/responses/Forbidden' }
+ *       404: { $ref: '#/components/responses/NotFound' }
+ */
 
 /**
  * @openapi
@@ -175,7 +312,11 @@ router.post(
  *       200: { description: Read receipt recorded }
  *       403: { $ref: '#/components/responses/Forbidden' }
  */
-router.patch('/:id/read', validate({ params: conversationIdParamSchema }), chatController.markRead);
+router.patch(
+  "/:id/read",
+  validate({ params: conversationIdParamSchema }),
+  chatController.markRead,
+);
 
 /**
  * @openapi
@@ -205,7 +346,7 @@ router.patch('/:id/read', validate({ params: conversationIdParamSchema }), chatC
  *       403: { $ref: '#/components/responses/Forbidden' }
  */
 router.get(
-  '/:id/calls',
+  "/:id/calls",
   validate({ params: conversationIdParamSchema, query: listCallsQuerySchema }),
   callController.listConversationCalls,
 );

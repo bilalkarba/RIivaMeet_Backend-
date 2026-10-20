@@ -2,6 +2,7 @@ import { prisma } from '../config/prisma.js';
 import { Prisma } from '../generated/prisma/client.js';
 import type { ExperienceLevel } from '../generated/prisma/enums.js';
 import type { SuggestionsQuery } from '../schemas/profile.schema.js';
+import { APPROVED_VERIFICATION_CONDITION } from './coach.service.js';
 import type { AuthenticatedUser } from '../utils/jwt.js';
 import { roundDistanceKm, roundTo } from '../utils/geo.js';
 import {
@@ -82,7 +83,12 @@ export async function suggestCompatibleCoaches(
 
   const hasCoordinates = query.latitude !== undefined && query.longitude !== undefined;
 
-  const conditions: Prisma.Sql[] = [Prisma.sql`cp.is_published = true`, Prisma.sql`cp.user_id <> ${viewer.id}`];
+  // Same discovery gate as `searchCoaches`: an unverified coach is never suggested.
+  const conditions: Prisma.Sql[] = [
+    Prisma.sql`cp.is_published = true`,
+    APPROVED_VERIFICATION_CONDITION,
+    Prisma.sql`cp.user_id <> ${viewer.id}`,
+  ];
 
   if (excludeUserIds.length > 0) {
     conditions.push(Prisma.sql`cp.user_id NOT IN (${Prisma.join(excludeUserIds)})`);

@@ -10,7 +10,7 @@ import { seedSports } from '../../prisma/seed.js';
  */
 export async function resetDatabase(): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "calls", "messages", "conversation_participants", "conversations", "reports", "blocks", "reviews", "notifications", "bookings", "availabilities", "coach_sports", "user_sports", "coach_profiles", "sports", "users" RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE "calls", "message_moderation_flags", "messages", "conversation_participants", "conversations", "reports", "blocks", "reviews", "notifications", "bookings", "availabilities", "coach_verification_events", "coach_verification_documents", "coach_verifications", "coach_sports", "user_sports", "coach_profiles", "sports", "users" RESTART IDENTITY CASCADE',
   );
   await seedSports(prisma);
 }

@@ -1,6 +1,6 @@
 import { prisma } from '../config/prisma.js';
 import { Prisma } from '../generated/prisma/client.js';
-import { BookingStatus } from '../generated/prisma/enums.js';
+import { BookingStatus, VerificationStatus } from '../generated/prisma/enums.js';
 import type { ExperienceLevel } from '../generated/prisma/enums.js';
 import type {
   CreateAvailabilityBody,
@@ -291,10 +291,20 @@ export async function deleteMyAvailability(userId: string, availabilityId: strin
   return listMyAvailability(userId);
 }
 
-/** Public coach detail. Only published profiles are visible. */
+/**
+ * Public coach detail.
+ *
+ * A profile is only visible when it is published *and* its owner's verification
+ * application is APPROVED. An unverified coach is indistinguishable from an unknown id
+ * (404), so verification cannot be bypassed by calling the API directly.
+ */
 export async function getCoachById(coachProfileId: string): Promise<CoachDetailResponse> {
   const coach = await prisma.coachProfile.findFirst({
-    where: { id: coachProfileId, isPublished: true },
+    where: {
+      id: coachProfileId,
+      isPublished: true,
+      verification: { is: { status: VerificationStatus.APPROVED } },
+    },
     include: {
       ...COACH_PROFILE_INCLUDE,
       // Only future, open windows are useful to a client.
@@ -316,6 +326,15 @@ export async function getCoachById(coachProfileId: string): Promise<CoachDetailR
 // ---------------------------------------------------------------------------
 
 const EARTH_RADIUS_KM_FOR_SQL = 6371;
+
+/**
+ * Single source of truth for the discovery gate, shared by search and suggestions.
+ * A coach profile is only discoverable with an APPROVED verification application.
+ */
+export const APPROVED_VERIFICATION_CONDITION = Prisma.sql`EXISTS (
+  SELECT 1 FROM coach_verifications cv
+  WHERE cv.coach_profile_id = cp.id AND cv.status = 'APPROVED'
+)`;
 
 interface RawCoachSearchRow {
   coach_profile_id: string;
@@ -358,7 +377,12 @@ export async function searchCoaches(
   const hasCoordinates = query.latitude !== undefined && query.longitude !== undefined;
   const excludeUserIds = options.excludeUserIds ?? [];
 
-  const conditions: Prisma.Sql[] = [Prisma.sql`cp.is_published = true`];
+  const conditions: Prisma.Sql[] = [
+    Prisma.sql`cp.is_published = true`,
+    // Verification gate: only APPROVED coaches are discoverable. Enforced in SQL (not only
+    // in the service layer) so every filter/sort/pagination combination inherits it.
+    APPROVED_VERIFICATION_CONDITION,
+  ];
 
   // Signed-in callers never see coaches they blocked (or who blocked them).
   if (excludeUserIds.length > 0) {

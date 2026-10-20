@@ -95,6 +95,59 @@ enum ReportStatus {
   REJECTED
 }
 
+/// Coach verification lifecycle (see `src/services/verification.service.ts`).
+///  DRAFT      - documents can still be uploaded/removed; never visible to admins as work
+///  PENDING    - submitted and awaiting review
+///  IN_REVIEW  - an administrator is actively reviewing the application
+///  NEEDS_INFO - the administrator asked for more/corrected documents
+///  APPROVED   - verified; the coach may become publicly discoverable (still subject to
+///               the existing profile publication rules: coordinates + at least one sport)
+///  REJECTED   - refused; the coach may correct and resubmit
+enum VerificationStatus {
+  DRAFT
+  PENDING
+  IN_REVIEW
+  NEEDS_INFO
+  APPROVED
+  REJECTED
+}
+
+/// Machine analysis state. Deliberately separate from `VerificationStatus` so an AI
+/// result can NEVER be confused with an official (human) decision. Research-and-verify
+/// concern: only an ADMIN can move a verification to APPROVED/REJECTED.
+enum AiAnalysisStatus {
+  NOT_STARTED
+  PENDING
+  COMPLETED
+  FAILED
+  MANUAL_REVIEW
+}
+
+/// Kind of professional document. Extend this enum (plus the migration) to require
+/// identity documents later; `VERIFICATION_REQUIRED_DOCUMENT_TYPES` decides what is
+/// mandatory at submission time.
+enum VerificationDocumentType {
+  DIPLOMA
+  CERTIFICATION
+  OTHER
+}
+
+/// Append-only audit trail of everything that happened to an application.
+enum VerificationEventType {
+  APPLICATION_STARTED
+  DOCUMENT_UPLOADED
+  DOCUMENT_REMOVED
+  SUBMITTED
+  RESUBMITTED
+  MARKED_IN_REVIEW
+  INFO_REQUESTED
+  APPROVED
+  REJECTED
+  AI_ANALYSIS_STARTED
+  AI_ANALYSIS_COMPLETED
+  AI_ANALYSIS_FAILED
+}
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   /// Stored lower-cased + trimmed. Unique index enforces one account per address.
@@ -121,6 +174,9 @@ model User {
   reviews      Review[]
   sports       UserSport[]
 
+  verificationsReviewed CoachVerification[]      @relation("VerificationReviewer")
+  verificationEvents    CoachVerificationEvent[] @relation("VerificationEventActor")
+
   blocksInitiated Block[]  @relation("BlockerBlocks")
   blocksReceived  Block[]  @relation("BlockedBlocks")
   reportsFiled    Report[] @relation("ReportReporter")
@@ -130,6 +186,9 @@ model User {
   conversations ConversationParticipant[]
   messagesSent  Message[]                 @relation("MessageSender")
   notifications Notification[]            @relation("NotificationRecipient")
+
+  moderationFlagsRaised   MessageModerationFlag[] @relation("ModerationFlagSender")
+  moderationFlagsReviewed MessageModerationFlag[] @relation("ModerationFlagReviewer")
 
   callsInitiated Call[] @relation("CallCaller")
   callsReceived  Call[] @relation("CallCallee")
@@ -164,6 +223,11 @@ model CoachProfile {
   availability Availability[]
   bookings     Booking[]
   reviews      Review[]
+
+  /// One verification application per coach profile. The row is created on the first
+  /// document upload (status DRAFT) and then updated in place on every submission, so
+  /// there is a single source of truth for "is this coach verified?".
+  verification CoachVerification?
 
   @@index([isPublished, hourlyPrice])
   @@index([city, neighborhood])
@@ -346,10 +410,11 @@ model Conversation {
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  participants ConversationParticipant[]
-  messages     Message[]
-  calls        Call[]
-  booking      Booking?   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  participants   ConversationParticipant[]
+  messages       Message[]
+  calls          Call[]
+  moderationFlags MessageModerationFlag[]
+  booking        Booking?   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   @@index([lastMessageAt])
   @@map("conversations")
@@ -376,12 +441,63 @@ model Message {
   senderId       String   @map("sender_id") @db.Uuid
   body           String   @db.Text
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  editedAt       DateTime? @map("edited_at") @db.Timestamptz(3)
+  revision       Int      @default(0)
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  moderationFlags MessageModerationFlag[]
+  attachment     ChatAttachment?
 
   @@index([conversationId, createdAt])
   @@map("messages")
+}
+
+model ChatAttachment {
+  id             String   @id @default(uuid()) @db.Uuid
+  messageId      String   @unique @map("message_id") @db.Uuid
+  clientUploadId String   @unique @map("client_upload_id") @db.Uuid
+  storageKey     String   @unique @map("storage_key")
+  fileName       String   @map("file_name")
+  contentType    String   @map("content_type")
+  sizeBytes      Int      @map("size_bytes")
+  checksum       String
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("chat_attachments")
+}
+
+/// A message held for administrator review because it contained off-platform contact
+/// details while `MESSAGE_MODERATION_POLICY=flag`.
+///
+/// The message itself is still persisted and delivered (flag is not a block); this row is
+/// the audit/moderation trail. `matches` contains detector kinds/labels only - never the
+/// matched phone number or address. Only administrators can read this table.
+model MessageModerationFlag {
+  id             String   @id @default(uuid()) @db.Uuid
+  messageId      String   @map("message_id") @db.Uuid
+  conversationId String   @map("conversation_id") @db.Uuid
+  senderId       String   @map("sender_id") @db.Uuid
+  /// Policy active when the message was flagged (`flag`). Stored for auditability.
+  policy         String
+  /// Structured detector result: [{ kind, label }]. Never the raw matched value.
+  matches        Json
+  reviewedById   String?  @map("reviewed_by_id") @db.Uuid
+  reviewedAt     DateTime? @map("reviewed_at") @db.Timestamptz(3)
+  reviewNote     String?  @map("review_note") @db.Text
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  message      Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation("ModerationFlagSender", fields: [senderId], references: [id], onDelete: Cascade)
+  reviewedBy   User?        @relation("ModerationFlagReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([messageId])
+  @@index([reviewedAt, createdAt])
+  @@index([senderId, createdAt])
+  @@map("message_moderation_flags")
 }
 
 /// Call history for a 1:1 audio/video call.
@@ -416,4 +532,115 @@ model Call {
   @@index([calleeId, status])
   @@index([callerId, status])
   @@map("calls")
+}
+
+/// Coach verification application.
+///
+/// This is the ONLY source of truth for coach approval: discovery, public coach detail
+/// and booking creation all require `status = APPROVED`. It is intentionally separate
+/// from `CoachProfile.isPublished` - publishing is a profile-completeness concern
+/// (coordinates + sports), verification is a trust concern.
+///
+/// `ai_*` columns hold the machine analysis. They are advisory only and never write to
+/// `status`; a provider cannot approve an account, and model output is treated as
+/// untrusted input (validated with Zod before it is stored).
+model CoachVerification {
+  id             String             @id @default(uuid()) @db.Uuid
+  /// One application per coach. Cascade on profile deletion so no orphan rows remain.
+  coachProfileId String             @unique @map("coach_profile_id") @db.Uuid
+  status         VerificationStatus @default(DRAFT)
+  /// Set the first time the application is submitted.
+  submittedAt    DateTime?          @map("submitted_at") @db.Timestamptz(3)
+  /// Updated on every (re)submission, so admins can sort by newest activity.
+  lastSubmittedAt DateTime?         @map("last_submitted_at") @db.Timestamptz(3)
+
+  aiStatus           AiAnalysisStatus @default(NOT_STARTED) @map("ai_status")
+  /// Provider/model recorded for auditability; provider errors are never exposed to clients.
+  aiProvider         String?          @map("ai_provider")
+  aiModel            String?          @map("ai_model")
+  /// Validated, structured extraction result (untrusted input, sanitized on write).
+  aiResult           Json?            @map("ai_result")
+  /// Neutral warning flags, e.g. LOW_READABILITY, NAME_MISMATCH, AUTHENTICITY_UNVERIFIED.
+  aiFlags            String[]         @default([]) @map("ai_flags")
+  aiSummary          String?          @map("ai_summary") @db.Text
+  /// Stable, safe error code (TIMEOUT, PROVIDER_ERROR, INVALID_RESPONSE, ...), never a stack trace.
+  aiErrorCode        String?          @map("ai_error_code")
+  /// Number of provider calls made for the current submission cycle (cost guard).
+  aiAttempts         Int              @default(0) @map("ai_attempts")
+  /// Hash of the document set that was analyzed, so an unchanged set is not re-sent.
+  aiAnalyzedInputHash String?         @map("ai_analyzed_input_hash")
+  aiAnalyzedAt       DateTime?        @map("ai_analyzed_at") @db.Timestamptz(3)
+
+  /// Set only for APPROVED/REJECTED (enforced by a CHECK constraint too).
+  reviewedById String?   @map("reviewed_by_id") @db.Uuid
+  reviewedAt   DateTime? @map("reviewed_at") @db.Timestamptz(3)
+  /// Admin decision note / feedback shown to the coach (e.g. the rejection reason).
+  reviewNote   String?   @map("review_note") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  coachProfile CoachProfile @relation(fields: [coachProfileId], references: [id], onDelete: Cascade)
+  reviewedBy   User?        @relation("VerificationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  documents CoachVerificationDocument[]
+  events    CoachVerificationEvent[]
+
+  @@index([status, submittedAt])
+  @@index([aiStatus])
+  @@index([reviewedById])
+  @@map("coach_verifications")
+}
+
+/// An uploaded professional document.
+///
+/// The bytes live in private object storage; PostgreSQL only keeps the safe metadata and
+/// the storage key. Keys are always server-generated (`verifications/<verificationId>/…`)
+/// so a client filename can never influence the path (no traversal, no collisions).
+model CoachVerificationDocument {
+  id             String                  @id @default(uuid()) @db.Uuid
+  verificationId String                  @map("verification_id") @db.Uuid
+  type           VerificationDocumentType
+  storageProvider String                 @map("storage_provider")
+  storageBucket  String?                 @map("storage_bucket")
+  /// Private object key. Unique so two rows can never point at the same object.
+  storageKey     String                  @unique @map("storage_key")
+  /// Sanitized display name only; NEVER used to build the storage key.
+  originalFileName String?               @map("original_file_name")
+  contentType    String                  @map("content_type")
+  sizeBytes      Int?                    @map("size_bytes")
+  checksumSha256 String?                 @map("checksum_sha256")
+  /// True once the upload was confirmed to exist in storage.
+  isCurrent      Boolean                 @default(false) @map("is_current")
+  confirmedAt    DateTime?               @map("confirmed_at") @db.Timestamptz(3)
+  uploadedAt     DateTime                @default(now()) @map("uploaded_at") @db.Timestamptz(3)
+  createdAt      DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime                @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  verification CoachVerification @relation(fields: [verificationId], references: [id], onDelete: Cascade)
+
+  @@index([verificationId, isCurrent])
+  @@index([verificationId, type])
+  @@map("coach_verification_documents")
+}
+
+/// Append-only audit history (who changed what, when, and why).
+model CoachVerificationEvent {
+  id             String                @id @default(uuid()) @db.Uuid
+  verificationId String                @map("verification_id") @db.Uuid
+  type           VerificationEventType
+  fromStatus     VerificationStatus?   @map("from_status")
+  toStatus       VerificationStatus?   @map("to_status")
+  /// Null for system/AI events; SetNull keeps history when an admin account is deleted.
+  actorUserId    String?               @map("actor_user_id") @db.Uuid
+  actorRole      Role?                 @map("actor_role")
+  note           String?               @db.Text
+  metadata       Json?
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  verification CoachVerification @relation(fields: [verificationId], references: [id], onDelete: Cascade)
+  actor        User?             @relation("VerificationEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([verificationId, createdAt])
+  @@map("coach_verification_events")
 }

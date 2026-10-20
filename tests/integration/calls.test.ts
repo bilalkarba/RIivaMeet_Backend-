@@ -432,6 +432,97 @@ describe('Call signalling', () => {
     expect(stored?.endedAt).not.toBeNull();
   });
 
+  it('keeps a ringing call alive when the caller reconnects within the grace period', async () => {
+    const { coach, client, conversationId } = await callableConversation();
+    const clientSocket = await connect(client.token);
+    const coachSocket = await connect(coach.token);
+
+    const incoming = nextEvent<{ call: CallPayload }>(coachSocket, 'call:incoming');
+    const callId = await startCall(clientSocket, conversationId, 'AUDIO');
+    await incoming;
+
+    // A tab switch / network blip disconnects the signalling socket; the server must wait
+    // for the grace period instead of treating it as a hang-up.
+    clientSocket.disconnect();
+    const reconnected = await connect(client.token);
+
+    await delay(1300);
+    const stored = await prisma.call.findUnique({ where: { id: callId } });
+    expect(stored?.status).toBe('RINGING');
+
+    const ended = nextEvent<{ call: CallPayload }>(coachSocket, 'call:ended');
+    const ack = await emitWithAck<{ ok: boolean }>(reconnected, 'call:end', { callId });
+    expect(ack.ok).toBe(true);
+    await expect(ended).resolves.toMatchObject({ call: { id: callId, status: 'CANCELLED' } });
+  });
+
+  it('keeps an accepted call alive across a signalling reconnect', async () => {
+    const { coach, client, conversationId } = await callableConversation();
+    const clientSocket = await connect(client.token);
+    const coachSocket = await connect(coach.token);
+
+    const incoming = nextEvent<{ call: CallPayload }>(coachSocket, 'call:incoming');
+    const callId = await startCall(clientSocket, conversationId, 'VIDEO');
+    await incoming;
+    await emitWithAck(coachSocket, 'call:accept', { callId });
+
+    // Simulate a Wi-Fi handover / tab suspension that outlives the disconnect grace.
+    clientSocket.disconnect();
+    const reconnected = await connect(client.token);
+    await delay(1300);
+
+    const stored = await prisma.call.findUnique({ where: { id: callId } });
+    expect(stored?.status).toBe('ACCEPTED');
+
+    const ended = nextEvent<{ call: CallPayload }>(coachSocket, 'call:ended');
+    const ack = await emitWithAck<{ ok: boolean }>(reconnected, 'call:end', { callId });
+    expect(ack.ok).toBe(true);
+    await expect(ended).resolves.toMatchObject({ call: { id: callId, status: 'ENDED' } });
+  });
+
+  it('relays an ICE restart request and the resulting offer', async () => {
+    const { coach, client, conversationId } = await callableConversation();
+    const clientSocket = await connect(client.token);
+    const coachSocket = await connect(coach.token);
+
+    const incoming = nextEvent<{ call: CallPayload }>(coachSocket, 'call:incoming');
+    const callId = await startCall(clientSocket, conversationId, 'VIDEO');
+    await incoming;
+    await emitWithAck(coachSocket, 'call:accept', { callId });
+
+    const request = nextEvent<{ callId: string; kind: string; from: string }>(
+      coachSocket,
+      'call:signal',
+    );
+    const requestAck = await emitWithAck<{ ok: boolean }>(clientSocket, 'call:signal', {
+      callId,
+      kind: 'restart-request',
+      data: { reason: 'ice-restart' },
+    });
+    expect(requestAck.ok).toBe(true);
+    await expect(request).resolves.toMatchObject({
+      callId,
+      kind: 'restart-request',
+      from: client.id,
+    });
+
+    const offer = nextEvent<{ callId: string; kind: string; data: unknown }>(
+      clientSocket,
+      'call:signal',
+    );
+    const offerAck = await emitWithAck<{ ok: boolean }>(coachSocket, 'call:signal', {
+      callId,
+      kind: 'offer',
+      data: { sdp: 'v=0 restart offer' },
+    });
+    expect(offerAck.ok).toBe(true);
+    await expect(offer).resolves.toMatchObject({
+      callId,
+      kind: 'offer',
+      data: { sdp: 'v=0 restart offer' },
+    });
+  });
+
   // --- History --------------------------------------------------------------
 
   it('returns the conversation call log to members only', async () => {

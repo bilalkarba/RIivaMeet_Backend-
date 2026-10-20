@@ -1,4 +1,5 @@
 import { prisma } from '../config/prisma.js';
+import { VerificationStatus } from '../generated/prisma/enums.js';
 import { ApiError } from '../utils/errors.js';
 import type { SportWithCoachCount } from '../utils/presenters.js';
 
@@ -6,15 +7,20 @@ import type { SportWithCoachCount } from '../utils/presenters.js';
  * Sports catalogue.
  *
  * The seed script inserts the required sports (Fitness, Boxing, Swimming, Football,
- * Tennis). `coachCount` counts only *published* coach profiles so the value matches
- * what a client would actually find when searching.
+ * Tennis). `coachCount` counts only coach profiles that are both published *and* verified,
+ * so the value matches what a client would actually find when searching.
  */
 export async function listSports(): Promise<SportWithCoachCount[]> {
   const [sports, counts] = await Promise.all([
     prisma.sport.findMany({ orderBy: { name: 'asc' } }),
     prisma.coachSport.groupBy({
       by: ['sportId'],
-      where: { coachProfile: { isPublished: true } },
+      where: {
+        coachProfile: {
+          isPublished: true,
+          verification: { is: { status: VerificationStatus.APPROVED } },
+        },
+      },
       _count: { _all: true },
     }),
   ]);

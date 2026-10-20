@@ -489,15 +489,38 @@ describe('Coach profile management', () => {
     expect(replaced.status).toBe(200);
     expect(replaced.body.data.map((sport: { slug: string }) => sport.slug)).toEqual(['tennis']);
 
+    const catalog = await api().get('/api/v1/sports');
+    const tennis = catalog.body.data.find((sport: { slug: string }) => sport.slug === 'tennis');
+    const replacedByIds = await api()
+      .put('/api/v1/coaches/me/sports')
+      .set('Authorization', bearer(coach.token))
+      .send({ sportIds: [tennis.id] });
+    expect(replacedByIds.status).toBe(200);
+    expect(replacedByIds.body.data.map((sport: { id: string }) => sport.id)).toEqual([tennis.id]);
+
+    const reloaded = await api()
+      .get('/api/v1/coaches/me/sports')
+      .set('Authorization', bearer(coach.token));
+    expect(reloaded.status).toBe(200);
+    expect(reloaded.body.data.map((sport: { id: string }) => sport.id)).toEqual([tennis.id]);
+
+    const cleared = await api()
+      .put('/api/v1/coaches/me/sports')
+      .set('Authorization', bearer(coach.token))
+      .send({ sportIds: [] });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data).toEqual([]);
+    const clearedOnReload = await api()
+      .get('/api/v1/coaches/me/sports')
+      .set('Authorization', bearer(coach.token));
+    expect(clearedOnReload.body.data).toEqual([]);
+
     const unknown = await api()
       .put('/api/v1/coaches/me/sports')
       .set('Authorization', bearer(coach.token))
       .send({ sportSlugs: ['tennis', 'quidditch'] });
     expect(unknown.status).toBe(400);
     expect(String(unknown.body.error.message)).toContain('quidditch');
-
-    const sports = await api().get('/api/v1/sports');
-    const tennis = sports.body.data.find((sport: { slug: string }) => sport.slug === 'tennis');
 
     const added = await api()
       .post('/api/v1/coaches/me/sports')

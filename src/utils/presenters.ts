@@ -8,7 +8,11 @@ import type {
   ReportTargetType,
   NotificationType,
   Role,
-} from '../generated/prisma/enums.js';
+  VerificationDocumentType,
+  VerificationEventType,
+  VerificationStatus,
+} from "../generated/prisma/enums.js";
+import type { ModerationOutcome } from "../types/moderation.js";
 
 /**
  * API presenters.
@@ -26,20 +30,23 @@ interface DecimalLike {
   toFixed(digits?: number): string;
 }
 
-export function toMoneyString(value: DecimalLike | string | number | null | undefined): string {
+export function toMoneyString(
+  value: DecimalLike | string | number | null | undefined,
+): string {
   if (value === null || value === undefined) {
-    return '0.00';
+    return "0.00";
   }
-  if (typeof value === 'number') {
+  if (typeof value === "number") {
     return value.toFixed(2);
   }
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     return Number(value).toFixed(2);
   }
   return value.toFixed(2);
 }
 
-const toIso = (value: Date | string): string => (value instanceof Date ? value.toISOString() : new Date(value).toISOString());
+const toIso = (value: Date | string): string =>
+  value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 
 export interface UserLike {
   id: string;
@@ -62,7 +69,10 @@ export interface PublicUser {
   updatedAt: string;
 }
 
-export function toPublicUser(user: UserLike, options?: { hasCoachProfile?: boolean }): PublicUser {
+export function toPublicUser(
+  user: UserLike,
+  options?: { hasCoachProfile?: boolean },
+): PublicUser {
   return {
     id: user.id,
     email: user.email,
@@ -78,7 +88,7 @@ export function toPublicUser(user: UserLike, options?: { hasCoachProfile?: boole
 export interface AuthResponse {
   user: PublicUser;
   accessToken: string;
-  tokenType: 'Bearer';
+  tokenType: "Bearer";
   expiresIn: string;
 }
 
@@ -116,7 +126,12 @@ export interface CoachProfileLike {
   updatedAt: Date;
   user?: { id: string; name: string; email?: string };
   sports?: { sport: SportSummary }[];
-  availability?: { id: string; startAt: Date; endAt: Date; isAvailable: boolean }[];
+  availability?: {
+    id: string;
+    startAt: Date;
+    endAt: Date;
+    isAvailable: boolean;
+  }[];
   _count?: { bookings?: number; reviews?: number };
 }
 
@@ -156,12 +171,16 @@ function toSportSummaries(sports?: { sport: SportSummary }[]): SportSummary[] {
 
 export function toCoachSummary(
   coach: CoachProfileLike,
-  metrics: { averageRating: number | null; reviewCount: number; distanceKm?: number | null },
+  metrics: {
+    averageRating: number | null;
+    reviewCount: number;
+    distanceKm?: number | null;
+  },
 ): CoachSummaryResponse {
   return {
     id: coach.id,
     userId: coach.userId,
-    name: coach.user?.name ?? 'Coach',
+    name: coach.user?.name ?? "Coach",
     bio: coach.bio,
     certifications: coach.certifications ?? [],
     hourlyPrice: toMoneyString(coach.hourlyPrice),
@@ -175,7 +194,9 @@ export function toCoachSummary(
     sports: toSportSummaries(coach.sports),
     averageRating: metrics.averageRating,
     reviewCount: metrics.reviewCount,
-    ...(metrics.distanceKm === undefined ? {} : { distanceKm: metrics.distanceKm }),
+    ...(metrics.distanceKm === undefined
+      ? {}
+      : { distanceKm: metrics.distanceKm }),
     createdAt: toIso(coach.createdAt),
     updatedAt: toIso(coach.updatedAt),
   };
@@ -183,19 +204,25 @@ export function toCoachSummary(
 
 export function toCoachDetail(
   coach: CoachProfileLike,
-  metrics: { averageRating: number | null; reviewCount: number; distanceKm?: number | null },
+  metrics: {
+    averageRating: number | null;
+    reviewCount: number;
+    distanceKm?: number | null;
+  },
 ): CoachDetailResponse {
   const summary = toCoachSummary(coach, metrics);
   return {
     ...summary,
-    coachName: coach.user?.name ?? 'Coach',
+    coachName: coach.user?.name ?? "Coach",
     availability: (coach.availability ?? []).map((slot) => ({
       id: slot.id,
       startAt: toIso(slot.startAt),
       endAt: toIso(slot.endAt),
       isAvailable: slot.isAvailable,
     })),
-    ...(coach._count?.bookings === undefined ? {} : { totalBookings: coach._count.bookings }),
+    ...(coach._count?.bookings === undefined
+      ? {}
+      : { totalBookings: coach._count.bookings }),
   };
 }
 
@@ -216,7 +243,12 @@ export interface BookingLike {
     hourlyPrice: DecimalLike | string | number;
     user?: { id: string; name: string };
   };
-  review?: { id: string; rating: number; comment: string | null; createdAt: Date } | null;
+  review?: {
+    id: string;
+    rating: number;
+    comment: string | null;
+    createdAt: Date;
+  } | null;
 }
 
 export interface BookingResponse {
@@ -237,7 +269,12 @@ export interface BookingResponse {
     neighborhood: string;
     hourlyPrice: string;
   };
-  review: { id: string; rating: number; comment: string | null; createdAt: string } | null;
+  review: {
+    id: string;
+    rating: number;
+    comment: string | null;
+    createdAt: string;
+  } | null;
 }
 
 export interface BookingNotificationLike {
@@ -279,8 +316,12 @@ export function toBookingNotificationResponse(
 }
 
 export function toBookingResponse(booking: BookingLike): BookingResponse {
-  const start = booking.startAt instanceof Date ? booking.startAt : new Date(booking.startAt);
-  const end = booking.endAt instanceof Date ? booking.endAt : new Date(booking.endAt);
+  const start =
+    booking.startAt instanceof Date
+      ? booking.startAt
+      : new Date(booking.startAt);
+  const end =
+    booking.endAt instanceof Date ? booking.endAt : new Date(booking.endAt);
 
   return {
     id: booking.id,
@@ -292,15 +333,15 @@ export function toBookingResponse(booking: BookingLike): BookingResponse {
     createdAt: toIso(booking.createdAt),
     updatedAt: toIso(booking.updatedAt),
     client: {
-      id: booking.client?.id ?? '',
-      name: booking.client?.name ?? 'Client',
+      id: booking.client?.id ?? "",
+      name: booking.client?.name ?? "Client",
     },
     coach: {
-      coachProfileId: booking.coachProfile?.id ?? '',
-      userId: booking.coachProfile?.userId ?? '',
-      name: booking.coachProfile?.user?.name ?? 'Coach',
-      city: booking.coachProfile?.city ?? '',
-      neighborhood: booking.coachProfile?.neighborhood ?? '',
+      coachProfileId: booking.coachProfile?.id ?? "",
+      userId: booking.coachProfile?.userId ?? "",
+      name: booking.coachProfile?.user?.name ?? "Coach",
+      city: booking.coachProfile?.city ?? "",
+      neighborhood: booking.coachProfile?.neighborhood ?? "",
       hourlyPrice: toMoneyString(booking.coachProfile?.hourlyPrice ?? 0),
     },
     review: booking.review
@@ -339,7 +380,10 @@ export function toReviewResponse(review: ReviewLike): ReviewResponse {
     rating: review.rating,
     comment: review.comment,
     createdAt: toIso(review.createdAt),
-    client: { id: review.client?.id ?? '', name: review.client?.name ?? 'Client' },
+    client: {
+      id: review.client?.id ?? "",
+      name: review.client?.name ?? "Client",
+    },
   };
 }
 
@@ -378,7 +422,12 @@ export function toProfileSports(
   sports: { sport: SportSummary; level: ExperienceLevel | null }[] | undefined,
 ): ProfileSportEntry[] {
   return (sports ?? [])
-    .map(({ sport, level }) => ({ id: sport.id, name: sport.name, slug: sport.slug, level }))
+    .map(({ sport, level }) => ({
+      id: sport.id,
+      name: sport.name,
+      slug: sport.slug,
+      level,
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -455,8 +504,16 @@ export interface UserRef {
   avatarUrl?: string | null;
 }
 
-function toUserRef(user: UserRef): { id: string; displayName: string; avatarUrl: string | null } {
-  return { id: user.id, displayName: user.displayName ?? user.name, avatarUrl: user.avatarUrl ?? null };
+function toUserRef(user: UserRef): {
+  id: string;
+  displayName: string;
+  avatarUrl: string | null;
+} {
+  return {
+    id: user.id,
+    displayName: user.displayName ?? user.name,
+    avatarUrl: user.avatarUrl ?? null,
+  };
 }
 
 export interface BlockedUserResponse {
@@ -466,8 +523,16 @@ export interface BlockedUserResponse {
   blockedAt: string;
 }
 
-export function toBlockedUser(block: { createdAt: Date; blocked: UserRef }): BlockedUserResponse {
-  return { id: block.blocked.id, displayName: block.blocked.displayName ?? block.blocked.name, avatarUrl: block.blocked.avatarUrl ?? null, blockedAt: toIso(block.createdAt) };
+export function toBlockedUser(block: {
+  createdAt: Date;
+  blocked: UserRef;
+}): BlockedUserResponse {
+  return {
+    id: block.blocked.id,
+    displayName: block.blocked.displayName ?? block.blocked.name,
+    avatarUrl: block.blocked.avatarUrl ?? null,
+    blockedAt: toIso(block.createdAt),
+  };
 }
 
 /** A report as its own reporter sees it (no reviewer identity, no internal notes). */
@@ -547,21 +612,57 @@ export interface MessageResponse {
   senderId: string;
   body: string;
   createdAt: string;
+  editedAt: string | null;
+  revision: number;
+  attachment: MessageAttachmentResponse | null;
+  /** Present on REST/socket acknowledgements to the sender; absent from broadcasts. */
+  moderation?: ModerationOutcome;
 }
 
-export function toMessageResponse(message: {
+export interface MessageAttachmentResponse {
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  downloadUrl: string;
+}
+
+export interface MessageDeletedResponse {
+  messageId: string;
+  conversationId: string;
+}
+
+export function toMessageResponse(
+  message: {
   id: string;
   conversationId: string;
   senderId: string;
   body: string;
   createdAt: Date;
-}): MessageResponse {
+  editedAt: Date | null;
+  revision: number;
+  },
+  attachment?: {
+    fileName: string;
+    contentType: string;
+    sizeBytes: number;
+  } | null,
+): MessageResponse {
   return {
     id: message.id,
     conversationId: message.conversationId,
     senderId: message.senderId,
     body: message.body,
     createdAt: toIso(message.createdAt),
+    editedAt: message.editedAt ? toIso(message.editedAt) : null,
+    revision: message.revision,
+    attachment: attachment
+      ? {
+          fileName: attachment.fileName,
+          contentType: attachment.contentType,
+          sizeBytes: attachment.sizeBytes,
+          downloadUrl: `/api/v1/conversations/${message.conversationId}/messages/${message.id}/attachment`,
+        }
+      : null,
   };
 }
 
@@ -581,27 +682,110 @@ export interface ConversationLike {
   createdAt: Date;
   updatedAt: Date;
   lastMessageAt: Date | null;
-  participants: { userId: string; user: { id: string; name: string; displayName: string | null; avatarUrl: string | null } }[];
+  participants: {
+    userId: string;
+    user: {
+      id: string;
+      name: string;
+      displayName: string | null;
+      avatarUrl: string | null;
+    };
+  }[];
+}
+
+// ---------------------------------------------------------------------------
+// Message moderation (admin review queue)
+// ---------------------------------------------------------------------------
+
+export interface AdminMessageFlagResponse {
+  id: string;
+  messageId: string;
+  conversationId: string;
+  policy: string;
+  matches: ModerationOutcome["matches"];
+  sender: { id: string; displayName: string };
+  message: { id: string; body: string; createdAt: string };
+  reviewedBy: { id: string; displayName: string } | null;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  createdAt: string;
+}
+
+export interface MessageModerationFlagLike {
+  id: string;
+  messageId: string;
+  conversationId: string;
+  policy: string;
+  matches: unknown;
+  reviewedAt: Date | null;
+  reviewNote: string | null;
+  createdAt: Date;
+  message: { id: string; body: string; createdAt: Date };
+  sender: UserRef;
+  reviewedBy?: UserRef | null;
+}
+
+export function toAdminMessageFlagResponse(
+  flag: MessageModerationFlagLike,
+): AdminMessageFlagResponse {
+  const matches = Array.isArray(flag.matches)
+    ? (flag.matches as ModerationOutcome["matches"])
+    : [];
+
+  return {
+    id: flag.id,
+    messageId: flag.messageId,
+    conversationId: flag.conversationId,
+    policy: flag.policy,
+    matches,
+    sender: toUserRef(flag.sender),
+    message: {
+      id: flag.message.id,
+      body: flag.message.body,
+      createdAt: toIso(flag.message.createdAt),
+    },
+    reviewedBy: flag.reviewedBy ? toUserRef(flag.reviewedBy) : null,
+    reviewedAt: flag.reviewedAt ? toIso(flag.reviewedAt) : null,
+    reviewNote: flag.reviewNote,
+    createdAt: toIso(flag.createdAt),
+  };
 }
 
 export function toConversationResponse(
   conversation: ConversationLike,
   viewerId: string,
-  options: { lastMessage?: { id: string; conversationId: string; senderId: string; body: string; createdAt: Date } | null; unreadCount?: number } = {},
+  options: {
+    lastMessage?: {
+      id: string;
+      conversationId: string;
+      senderId: string;
+      body: string;
+      createdAt: Date;
+      editedAt: Date | null;
+      revision: number;
+    } | null;
+    unreadCount?: number;
+  } = {},
 ): ConversationResponse {
-  const other = conversation.participants.find((participant) => participant.userId !== viewerId);
+  const other = conversation.participants.find(
+    (participant) => participant.userId !== viewerId,
+  );
   const otherUser = other?.user;
 
   return {
     id: conversation.id,
     participant: {
-      id: otherUser?.id ?? '',
-      displayName: otherUser?.displayName ?? otherUser?.name ?? 'Unknown user',
+      id: otherUser?.id ?? "",
+      displayName: otherUser?.displayName ?? otherUser?.name ?? "Unknown user",
       avatarUrl: otherUser?.avatarUrl ?? null,
     },
-    lastMessage: options.lastMessage ? toMessageResponse(options.lastMessage) : null,
+    lastMessage: options.lastMessage
+      ? toMessageResponse(options.lastMessage)
+      : null,
     unreadCount: options.unreadCount ?? 0,
-    lastMessageAt: conversation.lastMessageAt ? toIso(conversation.lastMessageAt) : null,
+    lastMessageAt: conversation.lastMessageAt
+      ? toIso(conversation.lastMessageAt)
+      : null,
     createdAt: toIso(conversation.createdAt),
     updatedAt: toIso(conversation.updatedAt),
   };
@@ -644,7 +828,7 @@ export interface CallResponse {
   conversationId: string;
   type: CallType;
   status: CallStatus;
-  direction: 'OUTGOING' | 'INCOMING';
+  direction: "OUTGOING" | "INCOMING";
   caller: { id: string; displayName: string; avatarUrl: string | null };
   callee: { id: string; displayName: string; avatarUrl: string | null };
   startedAt: string;
@@ -674,7 +858,7 @@ export function toCallResponse(call: CallLike, viewerId: string): CallResponse {
     conversationId: call.conversationId,
     type: call.type,
     status: call.status,
-    direction: call.callerId === viewerId ? 'OUTGOING' : 'INCOMING',
+    direction: call.callerId === viewerId ? "OUTGOING" : "INCOMING",
     caller: toUserRef(call.caller),
     callee: toUserRef(call.callee),
     startedAt: toIso(call.startedAt),
@@ -694,4 +878,378 @@ export interface IceServerResponse {
 export interface CallConfigResponse {
   iceServers: IceServerResponse[];
   ringTimeoutMs: number;
+  /** How long the client may stay disconnected before the server ends the call. */
+  disconnectGraceMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Coach verification
+// ---------------------------------------------------------------------------
+//
+// Privacy rules encoded here:
+//  - storage keys, buckets and providers are NEVER serialized to a coach, and only the
+//    storage metadata an admin endpoint actually needs is exposed internally;
+//  - the machine analysis is presented as advice (`advisoryOnly: true`,
+//    `authenticityVerified: false`) and is visibly separate from the official decision;
+//  - reviewer identity is only exposed in the ADMIN projection.
+
+/** A verification application row, as read from the database. */
+export interface VerificationRow {
+  id: string;
+  coachProfileId: string;
+  status: VerificationStatus;
+  submittedAt: Date | null;
+  lastSubmittedAt: Date | null;
+  reviewedById: string | null;
+  reviewedAt: Date | null;
+  reviewNote: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  reviewedBy?: { id: string; name: string; displayName?: string | null } | null;
+  documents?: VerificationDocumentRow[];
+  events?: VerificationEventRow[];
+}
+
+export interface VerificationDocumentRow {
+  id: string;
+  verificationId?: string;
+  type: VerificationDocumentType;
+  storageKey?: string;
+  storageProvider?: string;
+  storageBucket?: string | null;
+  originalFileName: string | null;
+  contentType: string;
+  sizeBytes: number | null;
+  isCurrent: boolean;
+  confirmedAt: Date | null;
+  uploadedAt: Date;
+}
+
+export interface VerificationEventRow {
+  id: string;
+  type: VerificationEventType;
+  fromStatus: VerificationStatus | null;
+  toStatus: VerificationStatus | null;
+  actorUserId: string | null;
+  actorRole: Role | null;
+  note: string | null;
+  createdAt: Date;
+  actor?: { id: string; name: string; displayName?: string | null } | null;
+}
+
+/** Internal-only projection used to stream a private document to an administrator. */
+export interface VerificationStorageRow {
+  id: string;
+  verificationId: string;
+  storageKey: string;
+  storageProvider: string;
+  storageBucket: string | null;
+  contentType: string;
+  originalFileName: string | null;
+  sizeBytes: number | null;
+  isCurrent: boolean;
+}
+
+/** `status` is `NOT_SUBMITTED` when no application row exists yet. */
+export type VerificationStatusResponse = VerificationStatus | "NOT_SUBMITTED";
+
+export interface VerificationDocumentResponse {
+  id: string;
+  type: VerificationDocumentType;
+  fileName: string | null;
+  contentType: string;
+  sizeBytes: number | null;
+  isCurrent: boolean;
+  uploadedAt: string;
+  /** True once the upload has been confirmed against storage. */
+  confirmed: boolean;
+}
+
+export interface VerificationHistoryEntry {
+  type: VerificationEventType;
+  fromStatus: VerificationStatus | null;
+  toStatus: VerificationStatus | null;
+  note: string | null;
+  createdAt: string;
+  /** Present only in the admin projection. */
+  actor?: { id: string; displayName: string } | null;
+}
+
+/** Coach-facing view: no storage details, no reviewer identity. */
+export interface CoachVerificationResponse {
+  status: VerificationStatusResponse;
+  submittedAt: string | null;
+  lastSubmittedAt: string | null;
+  requiredDocumentTypes: string[];
+  missingRequirements: string[];
+  canEditDocuments: boolean;
+  canSubmit: boolean;
+  documents: VerificationDocumentResponse[];
+  adminFeedback: { note: string | null; decidedAt: string | null };
+  history: VerificationHistoryEntry[];
+}
+
+export interface PublicVerificationStatusResponse {
+  status: VerificationStatusResponse;
+  isPublished: boolean;
+  /** Only an APPROVED, published profile is discoverable and bookable. */
+  isPubliclyVisible: boolean;
+}
+
+export interface AdminCoachRef {
+  id: string;
+  name: string;
+  email?: string;
+  displayName?: string | null;
+}
+
+export interface AdminVerificationSummaryResponse {
+  /** Null when the coach has not started an application yet. */
+  id: string | null;
+  coachProfileId: string;
+  status: VerificationStatusResponse;
+  submittedAt: string | null;
+  lastSubmittedAt: string | null;
+  coach: { id: string; displayName: string; email: string | null } | null;
+  isPublished: boolean;
+  documentCount: number;
+  reviewNote: string | null;
+  reviewedAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface AdminVerificationDetailResponse
+  extends AdminVerificationSummaryResponse {
+  documents: VerificationDocumentResponse[];
+  reviewedBy: { id: string; displayName: string } | null;
+  history: VerificationHistoryEntry[];
+}
+
+function toVerificationDocument(
+  document: VerificationDocumentRow,
+): VerificationDocumentResponse {
+  return {
+    id: document.id,
+    type: document.type,
+    fileName: document.originalFileName,
+    contentType: document.contentType,
+    sizeBytes: document.sizeBytes,
+    isCurrent: document.isCurrent,
+    uploadedAt: toIso(document.uploadedAt),
+    confirmed: document.confirmedAt !== null,
+  };
+}
+
+function toVerificationHistory(
+  events: VerificationEventRow[] | undefined,
+  options: { includeActor: boolean },
+): VerificationHistoryEntry[] {
+  return (events ?? [])
+    .filter((event) => !event.type.startsWith("AI_ANALYSIS_"))
+    .map((event) => ({
+      type: event.type,
+      fromStatus: event.fromStatus,
+      toStatus: event.toStatus,
+      note: event.note,
+      createdAt: toIso(event.createdAt),
+      ...(options.includeActor
+        ? {
+            actor:
+              event.actor || event.actorUserId
+                ? {
+                    id: event.actor?.id ?? (event.actorUserId as string),
+                    displayName:
+                      event.actor?.displayName ?? event.actor?.name ?? "System",
+                  }
+                : null,
+          }
+        : {}),
+    }));
+}
+
+/** Coach-facing verification view. */
+export function toCoachVerification(
+  verification: VerificationRow & {
+    documents?: VerificationDocumentRow[];
+    events?: VerificationEventRow[];
+    reviewedBy?: {
+      id: string;
+      name: string;
+      displayName?: string | null;
+    } | null;
+  },
+  options: { missingRequirements: string[]; requiredDocumentTypes: string[] },
+): CoachVerificationResponse {
+  const editable: VerificationStatus[] = ["DRAFT", "NEEDS_INFO", "REJECTED"];
+  const submittable: VerificationStatus[] = ["DRAFT", "NEEDS_INFO", "REJECTED"];
+
+  return {
+    status: verification.status,
+    submittedAt: verification.submittedAt
+      ? toIso(verification.submittedAt)
+      : null,
+    lastSubmittedAt: verification.lastSubmittedAt
+      ? toIso(verification.lastSubmittedAt)
+      : null,
+    requiredDocumentTypes: options.requiredDocumentTypes,
+    missingRequirements: options.missingRequirements,
+    canEditDocuments: editable.includes(verification.status),
+    canSubmit:
+      submittable.includes(verification.status) &&
+      options.missingRequirements.length === 0,
+    documents: (verification.documents ?? [])
+      .filter((document) => document.confirmedAt !== null)
+      .map(toVerificationDocument),
+    adminFeedback: {
+      note: verification.reviewNote,
+      decidedAt: verification.reviewedAt
+        ? toIso(verification.reviewedAt)
+        : null,
+    },
+    history: toVerificationHistory(verification.events, {
+      includeActor: false,
+    }),
+  };
+}
+
+/** The "nothing started yet" view, so the coach UI has one shape to render. */
+export function emptyCoachVerification(
+  requiredDocumentTypes: string[] = [],
+): CoachVerificationResponse {
+  return {
+    status: "NOT_SUBMITTED",
+    submittedAt: null,
+    lastSubmittedAt: null,
+    requiredDocumentTypes,
+    missingRequirements: ["At least one confirmed document is required"],
+    canEditDocuments: true,
+    canSubmit: false,
+    documents: [],
+    adminFeedback: { note: null, decidedAt: null },
+    history: [],
+  };
+}
+
+export function toPublicVerificationStatus(input: {
+  status: VerificationStatus | null;
+  isPublished: boolean;
+  isPubliclyVisible: boolean;
+}): PublicVerificationStatusResponse {
+  return {
+    status: input.status ?? "NOT_SUBMITTED",
+    isPublished: input.isPublished,
+    isPubliclyVisible: input.isPubliclyVisible,
+  };
+}
+
+/** Input for the admin list/detail projections (built by the verification service). */
+export interface AdminVerificationSummaryInput {
+  id: string | null;
+  coachProfileId: string;
+  status: VerificationStatus;
+  submittedAt: Date | null;
+  lastSubmittedAt: Date | null;
+  reviewNote: string | null;
+  reviewedAt: Date | null;
+  updatedAt: Date | null;
+  isPublished: boolean;
+  coach: AdminCoachRef | null;
+  documentCount: number;
+}
+
+export function toAdminVerificationSummary(
+  input: AdminVerificationSummaryInput,
+): AdminVerificationSummaryResponse {
+  return {
+    id: input.id,
+    coachProfileId: input.coachProfileId,
+    status: input.id ? input.status : "NOT_SUBMITTED",
+    submittedAt: input.submittedAt ? toIso(input.submittedAt) : null,
+    lastSubmittedAt: input.lastSubmittedAt
+      ? toIso(input.lastSubmittedAt)
+      : null,
+    coach: input.coach
+      ? {
+          id: input.coach.id,
+          displayName: input.coach.displayName ?? input.coach.name,
+          email: input.coach.email ?? null,
+        }
+      : null,
+    isPublished: input.isPublished,
+    documentCount: input.documentCount,
+    reviewNote: input.reviewNote,
+    reviewedAt: input.reviewedAt ? toIso(input.reviewedAt) : null,
+    updatedAt: input.updatedAt ? toIso(input.updatedAt) : null,
+  };
+}
+
+export function toAdminVerificationDetail(
+  verification: VerificationRow & {
+    coachProfile: {
+      id: string;
+      isPublished?: boolean;
+      user?: AdminCoachRef | null;
+    };
+    documents?: VerificationDocumentRow[];
+    events?: VerificationEventRow[];
+    reviewedBy?: {
+      id: string;
+      name: string;
+      displayName?: string | null;
+    } | null;
+    _count?: { documents?: number };
+  },
+): AdminVerificationDetailResponse {
+  const summary = toAdminVerificationSummary({
+    id: verification.id,
+    coachProfileId: verification.coachProfileId,
+    status: verification.status,
+    submittedAt: verification.submittedAt,
+    lastSubmittedAt: verification.lastSubmittedAt,
+    reviewNote: verification.reviewNote,
+    reviewedAt: verification.reviewedAt,
+    updatedAt: verification.updatedAt,
+    isPublished: verification.coachProfile.isPublished ?? false,
+    coach: verification.coachProfile.user ?? null,
+    documentCount:
+      verification._count?.documents ?? verification.documents?.length ?? 0,
+  });
+
+  return {
+    ...summary,
+    documents: (verification.documents ?? []).map(toVerificationDocument),
+    reviewedBy: verification.reviewedBy
+      ? {
+          id: verification.reviewedBy.id,
+          displayName:
+            verification.reviewedBy.displayName ?? verification.reviewedBy.name,
+        }
+      : null,
+    history: toVerificationHistory(verification.events, { includeActor: true }),
+  };
+}
+
+export function toAdminVerificationSummaryFromRow(
+  verification: VerificationRow & {
+    coachProfile: {
+      id: string;
+      isPublished?: boolean;
+      user?: AdminCoachRef | null;
+    };
+    _count?: { documents?: number };
+  },
+): AdminVerificationSummaryResponse {
+  return toAdminVerificationSummary({
+    id: verification.id,
+    coachProfileId: verification.coachProfileId,
+    status: verification.status,
+    submittedAt: verification.submittedAt,
+    lastSubmittedAt: verification.lastSubmittedAt,
+    reviewNote: verification.reviewNote,
+    reviewedAt: verification.reviewedAt,
+    updatedAt: verification.updatedAt,
+    isPublished: verification.coachProfile.isPublished ?? false,
+    coach: verification.coachProfile.user ?? null,
+    documentCount: verification._count?.documents ?? 0,
+  });
 }
